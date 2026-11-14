@@ -84,6 +84,10 @@ class SDARRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
+        if hidden_states.device.type == "npu":
+            import torch_npu
+            return torch_npu.npu_rms_norm(
+                hidden_states.contiguous(), self.weight, self.variance_epsilon)[0]
         if hidden_states.device.type != "cuda" or flash_rms_norm is None:
             return F.rms_norm(hidden_states, (hidden_states.shape[-1],), self.weight, self.variance_epsilon)
         return flash_rms_norm(
@@ -116,6 +120,11 @@ class SDARMLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
+        if x.device.type == "npu" and self.config.hidden_act == "silu":
+            import torch_npu
+            # npu_swiglu applies SiLU to the first half, then multiplies the second.
+            gate_up = torch.cat((self.gate_proj(x), self.up_proj(x)), dim=-1)
+            return self.down_proj(torch_npu.npu_swiglu(gate_up, dim=-1))
         if x.device.type == "cuda" and liger_kernel_is_available:
             return self.down_proj(LigerSiLUMulFunction.apply(self.gate_proj(x), self.up_proj(x)))
         else:
@@ -196,6 +205,31 @@ def eager_attention_forward(
     attn_output = attn_output.transpose(1, 2).contiguous()
 
     return attn_output, attn_weights
+
+
+def npu_attention_forward(query, key, value, attention_mask, scaling):
+    """BNSD fused training attention; incoming masks use 1/True = visible."""
+    import torch_npu
+
+    blocked = None
+    if attention_mask is not None:
+        if attention_mask.dim() == 2:
+            visible = attention_mask[:, None, None, :key.shape[-2]]
+        elif attention_mask.dim() == 4:
+            visible = attention_mask[..., :key.shape[-2]]
+        else:
+            raise ValueError("NPU attention expects a 2D padding or 4D visibility mask")
+        visible = visible if visible.dtype == torch.bool else visible > 0
+        # NPU polarity is opposite to this model: True means blocked.
+        # Materialize broadcast query/batch axes, but keep a shared head axis.
+        blocked = (~visible).expand(
+            query.shape[0], visible.shape[1], query.shape[-2], key.shape[-2]
+        ).contiguous()
+    return torch_npu.npu_fusion_attention(
+        query.contiguous(), key.contiguous(), value.contiguous(),
+        head_num=query.shape[1], input_layout="BNSD", atten_mask=blocked,
+        scale=scaling, keep_prob=1.0, sparse_mode=0, inner_precise=2,
+    )[0]
 
 
 class SDARAttention(nn.Module):
@@ -306,6 +340,13 @@ class SDARAttention(nn.Module):
         '''
 
         #print(query_states.shape, key_states.shape, value_states.shape)
+
+        if query_states.device.type == "npu":
+            # Native GQA keeps the original KV-head count and supports backward.
+            attn_output = npu_attention_forward(
+                query_states, key_states, value_states, attention_mask, self.scaling)
+            attn_output = attn_output.transpose(1, 2).reshape(*input_shape, -1).contiguous()
+            return self.o_proj(attn_output), None
 
         # --- After RoPE and KV-cache handling, expand KV to all heads ---
         key_states   = repeat_kv(key_states,   self.num_key_value_groups)  # [B, H, K, D]
