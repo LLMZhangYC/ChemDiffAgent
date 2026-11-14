@@ -25,6 +25,7 @@ from accelerate.utils import DistributedType, set_seed
 from models import SDARForCausalLM
 from transformers import AutoTokenizer
 from train.prompting_utils import UniversalPrompting
+from train.validation import split_training_data, evaluate
 from train.profiling import create_profiler
 from models.lr_schedulers import get_scheduler
 from models.logging import set_verbosity_info, set_verbosity_error
@@ -278,6 +279,25 @@ def main():
     if max_samples is not None:
         dataset_load = dataset_load[:int(max_samples)]
 
+    split_seed = config.dataset.get("split_seed", config.training.seed if config.training.seed is not None else 10086)
+    if isinstance(split_seed, bool) or not isinstance(split_seed, int):
+        raise ValueError("dataset.split_seed must be an integer")
+    validation_seed = config.dataset.get("validation_seed", split_seed + 1)
+    if isinstance(validation_seed, bool) or not isinstance(validation_seed, int):
+        raise ValueError("dataset.validation_seed must be an integer")
+    validation_config = config.get("validation", {})
+    eval_steps = validation_config.get("eval_steps")
+    if eval_steps is not None and (isinstance(eval_steps, bool) or not isinstance(eval_steps, int) or eval_steps < 1):
+        raise ValueError("validation.eval_steps must be a positive integer or null")
+    train_rows, validation_rows, split_manifest = split_training_data(
+        dataset_load, config.dataset.get("validation_fraction", 0.0), split_seed)
+    train_source_count = len(train_rows)
+    validation_enabled = bool(validation_rows)
+    dataset_load = train_rows + validation_rows
+    if accelerator.is_main_process:
+        (Path(output_dir) / "data_split.json").write_text(
+            json.dumps(split_manifest, indent=2) + "\n", encoding="utf-8")
+
     prompt_list = []
     response_list = []
     step_map_list = []
@@ -285,6 +305,8 @@ def main():
         prompt_list.append(x["prompt"])
         response_list.append(x["response"])
     input_ids_lm, _, start_pos, drop_num = uni_prompting((prompt_list, response_list))
+    validation_sources = torch.tensor(
+        [i >= train_source_count for i in uni_prompting.kept_indices], dtype=torch.bool)
     dataset_load = [dataset_load[i] for i in uni_prompting.kept_indices]
     if uni_prompting.stats:
         logger.info(f"Sequence preprocessing: {uni_prompting.stats}")
@@ -465,7 +487,7 @@ def main():
             results.append(absolute_positions)
         
         return results
-    def collect_training_data(input_ids: torch.tensor, step_map_list):
+    def collect_training_data(input_ids: torch.tensor, step_map_list, generator=None):
 
         B, L = input_ids.shape
         L0    = start_pos
@@ -491,8 +513,8 @@ def main():
             
             for b in range(B):
 
-                prob_ramp = torch.empty(L1).uniform_(lower, upper)
-                rand_tail = torch.rand(L1)
+                prob_ramp = torch.empty(L1).uniform_(lower, upper, generator=generator)
+                rand_tail = torch.rand(L1, generator=generator)
                 pmask_tail = rand_tail <= prob_ramp  # [L1], True means to mask
 
                 if mask_tool_responses:
@@ -577,7 +599,13 @@ def main():
         
 
     
-    extended_input_ids, p_mask, tok_idx_ext, labels = collect_training_data(input_ids_lm, step_map_list)
+    if not (~validation_sources).any():
+        raise ValueError("No training samples remain after prompt/response preprocessing")
+    if validation_enabled and not validation_sources.any():
+        raise ValueError("No validation samples remain after prompt/response preprocessing")
+    train_step_maps = [row for row, is_val in zip(step_map_list, validation_sources.tolist()) if not is_val]
+    extended_input_ids, p_mask, tok_idx_ext, labels = collect_training_data(
+        input_ids_lm[~validation_sources], train_step_maps)
     if not len(extended_input_ids):
         raise ValueError("No supervised tokens survived noise sampling; check data and masking probabilities")
     if max_seq_length is not None and extended_input_ids.shape[1] > max_seq_length:
@@ -587,6 +615,30 @@ def main():
 
 
     dataset_lm = TrainDataset(extended_input_ids, p_mask, tok_idx_ext, labels)
+    validation_dataloader = None
+    validation_dataset = None
+    if validation_enabled:
+        val_step_maps = [row for row, is_val in zip(step_map_list, validation_sources.tolist()) if is_val]
+        # A separate CPU generator keeps held-out corruption fixed without changing training RNG.
+        validation_tensors = collect_training_data(
+            input_ids_lm[validation_sources], val_step_maps,
+            generator=torch.Generator().manual_seed(validation_seed))
+        validation_dataset = TrainDataset(*validation_tensors)
+        if not len(validation_dataset):
+            raise ValueError("No validation masked targets survived corruption; change validation_seed/data")
+        validation_dataloader = DataLoader(
+            validation_dataset, batch_size=config.training.batch_size_lm, shuffle=False,
+            collate_fn=simple_collate, num_workers=0,
+            generator=torch.Generator().manual_seed(validation_seed))
+    split_manifest.update(train_preprocessed_samples=int((~validation_sources).sum()),
+                          validation_preprocessed_samples=int(validation_sources.sum()),
+                          train_examples=len(dataset_lm),
+                          validation_examples=len(validation_dataset) if validation_enabled else 0,
+                          validation_seed=validation_seed)
+    split_manifest["dataset_path"] = str(dataset_path)
+    if accelerator.is_main_process:
+        (Path(output_dir) / "data_split.json").write_text(
+            json.dumps(split_manifest, indent=2) + "\n", encoding="utf-8")
 
     total_batch_size_lm = config.training.batch_size_lm * accelerator.num_processes * config.training.gradient_accumulation_steps
     num_update_steps_per_epoch = math.ceil(len(dataset_lm) / total_batch_size_lm)
@@ -619,9 +671,12 @@ def main():
     #       Prepare accelerator     #
     #################################
     logger.info("Preparing model, optimizer and dataloaders")
-    model, optimizer, lr_scheduler, train_dataloader_lm = accelerator.prepare(
-        model, optimizer, lr_scheduler, train_dataloader_lm
-    )
+    if validation_enabled:
+        model, optimizer, lr_scheduler, train_dataloader_lm, validation_dataloader = accelerator.prepare(
+            model, optimizer, lr_scheduler, train_dataloader_lm, validation_dataloader)
+    else:
+        model, optimizer, lr_scheduler, train_dataloader_lm = accelerator.prepare(
+            model, optimizer, lr_scheduler, train_dataloader_lm)
 
     #################################
     #             Training          #
@@ -631,6 +686,7 @@ def main():
     logger.info(f"  Num response = {len(dataset_load)}")
     logger.info(f"  Num sample dropped = {drop_num}")
     logger.info(f"  Num training data = {extended_input_ids.shape[0]}")
+    logger.info(f"  Num validation data = {len(validation_dataset) if validation_enabled else 0}")
     logger.info(f"  Num training steps = {max_train_steps}")
     logger.info(f"  Instantaneous batch size per device = {config.training.batch_size_lm}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size_lm}")
@@ -642,7 +698,7 @@ def main():
 
     import torch.nn.functional as F
 
-    def forward_process(extended_input_ids, p_mask, tok_idx_ext, labels):
+    def forward_process(extended_input_ids, p_mask, tok_idx_ext, labels, return_metrics=False):
 
         B, L = p_mask.shape
         L0    = start_pos
@@ -671,6 +727,12 @@ def main():
             response_token_count = (response_token_count - excluded).clamp_min(1)
         loss_lm = -(logp_tok * p_mask).sum(dim=1) / response_token_count
 
+        if return_metrics:
+            masked_nll = -(logp_tok.float() * p_mask).sum(dim=1)
+            correct = ((logits.argmax(dim=-1) == labels) & p_mask).sum(dim=1)
+            return torch.stack((loss_lm.float(), masked_nll, p_mask.sum(dim=1).float(),
+                                correct.float()), dim=1)
+
         loss_lm = loss_lm.sum() / B
         
         return loss_lm
@@ -681,6 +743,25 @@ def main():
     from tqdm.auto import tqdm
     global_steps = 0
     completed_optimizer_steps = 0
+    last_validation_step = None
+    last_validation_epoch = None
+    validation_history = []
+
+    def run_validation(epoch):
+        nonlocal last_validation_step, last_validation_epoch
+        metrics = evaluate(model, validation_dataloader,
+                           lambda **batch: forward_process(**batch, return_metrics=True), accelerator)
+        entry = dict(epoch=epoch, micro_step=global_steps, optimizer_step=completed_optimizer_steps, **metrics)
+        validation_history.append(entry)
+        last_validation_step = completed_optimizer_steps
+        last_validation_epoch = epoch
+        logger.info(f"Validation: {entry}")
+        if accelerator.is_main_process:
+            with (Path(output_dir) / "validation_metrics.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry) + "\n")
+            if config.wandb.get("enabled", True):
+                wandb.log({f"validation/{key}": value for key, value in metrics.items()}, step=global_steps)
+
     for epoch in range(first_epoch, num_train_epochs):
         
         model.train()
@@ -740,10 +821,17 @@ def main():
                 if optimizer_updated:
                     # Include all accumulated micro-batches, and advance before early stopping.
                     profiler.step()
+                if (validation_enabled and eval_steps is not None and completed_optimizer_steps > 0
+                        and completed_optimizer_steps % eval_steps == 0
+                        and last_validation_step != completed_optimizer_steps):
+                    run_validation(epoch)
                 if max_optimizer_steps is not None and completed_optimizer_steps >= max_optimizer_steps:
                     logger.info(f"Reached training.max_steps={max_optimizer_steps}; saving and stopping")
                     break
         accelerator.wait_for_everyone()
+        if (validation_enabled and validation_config.get("eval_after_epoch", True)
+                and (last_validation_step, last_validation_epoch) != (completed_optimizer_steps, epoch)):
+            run_validation(epoch)
         save_checkpoint(model, tokenizer, config, accelerator, config.model.optimized_name, epoch=epoch)
         if max_optimizer_steps is not None and completed_optimizer_steps >= max_optimizer_steps:
             break
@@ -763,6 +851,7 @@ def main():
             "optimizer_steps": int(getattr(model, "global_steps", global_steps)),
             "scheduler_steps": int(getattr(getattr(lr_scheduler, "scheduler", lr_scheduler), "last_epoch", -1)),
             "last_loss": float(loss_lm.detach()),
+            "validation": validation_history,
         }
         if accelerator.device.type == "npu":
             report["peak_allocated_gib"] = torch.npu.max_memory_allocated() / 2**30

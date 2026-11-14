@@ -23,9 +23,16 @@ model:
   optimized_name: optimized
 
 dataset:
+  validation_fraction: 0.1
+  split_seed: 10086
+  validation_seed: 10087
   path: /data/ChemDiffAgent/dataset/training/train.json
   # null uses all records instead of the 16-record smoke subset.
   max_samples: null
+
+validation:
+  eval_steps: 3
+  eval_after_epoch: true
 
 training:
   device: npu

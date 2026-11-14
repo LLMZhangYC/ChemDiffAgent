@@ -84,6 +84,7 @@ class ProfilingTests(unittest.TestCase):
             batch = {k: Tensor() for k in ["extended_input_ids", "p_mask", "tok_idx_ext", "labels"]}
             env = dict(first_epoch=0, num_train_epochs=5, model=model, global_steps=0,
                        completed_optimizer_steps=0, max_optimizer_steps=cap, output_dir=".", tokenizer=None,
+                       validation_enabled=False,
                        tqdm=lambda data, **kw: Progress(data), train_dataloader_lm=[batch]*10,
                        create_profiler=profiler_factory, time=NS(time=lambda: 0), end=0,
                        data_time_m=NS(update=lambda x: None), forward_process=lambda **kw: Tensor(),

@@ -186,3 +186,40 @@ bash scripts/train_sft_npu.sh config=training/sft/configs/chemdiffagent_sft_full
 
 Check the startup banner for `epochs=1 max_steps=3 gradient_accumulation_steps=1`.
 Check the final log for `Reached training.max_steps=3; saving and stopping`.
+
+On the validation branch, `chemdiffagent_sft_full_npu_3steps.yaml` additionally
+sets `validation.eval_steps: 3`. It runs one held-out evaluation after the third
+optimizer update, then saves and exits without evaluating the same state twice.
+`chemdiffagent_sft_full_npu.yaml` retains `validation.eval_steps: null` and
+`eval_after_epoch: true`, so normal full training validates only at epoch end.
+
+## SFT training/validation split
+
+SFT recipes hold out 10% of the input training data for validation. The split is
+deterministic and groups identical prompts together, so alternative responses
+and trace-expanded states for the same prompt cannot cross the train/validation
+boundary. `dataset.max_samples`, when set, applies before splitting.
+
+```yaml
+dataset:
+  validation_fraction: 0.1  # Set to 0 to disable the holdout.
+  split_seed: 10086
+  validation_seed: 10087
+validation:
+  eval_steps: null         # Optional positive interval in optimizer updates.
+  eval_after_epoch: true
+```
+
+Validation runs on every rank with `eval()` and no gradients, then restores the
+previous model mode. Its masking is generated once with a separate fixed seed;
+tool responses and padding remain excluded from supervision. Metrics include
+the response-normalized loss used for training, masked-token cross entropy, and
+masked-token accuracy. Distributed aggregation removes padded duplicate examples.
+These are denoising metrics, not generated-answer benchmark accuracy.
+
+The output directory contains `data_split.json` (source indices, seeds and retained
+counts), `validation_metrics.jsonl` (one record per evaluation), and validation
+history in `training_report.json`. Checkpoints remain saved at epoch boundaries;
+validation does not automatically select or overwrite a best checkpoint.
+Older external configs without `validation_fraction` retain training-only behavior.
+The CPU tests run with `python training/sft/tests/test_validation.py`.

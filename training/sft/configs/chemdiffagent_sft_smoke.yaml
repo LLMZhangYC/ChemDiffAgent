@@ -17,9 +17,17 @@ model:
   optimized_name: optimized
 
 dataset:
+  validation_fraction: 0.1
+  split_seed: 10086
+  validation_seed: 10087
   path: /data/ChemDiffAgent/dataset/training/train.json
   max_samples: 32
 
+
+validation:
+  # null means evaluate only at epoch end; integers count optimizer updates.
+  eval_steps: null
+  eval_after_epoch: true
 
 training:
   device: npu
