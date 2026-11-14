@@ -70,9 +70,14 @@ def main():
     project_name = config.experiment.project
     output_dir = config.experiment.get("output_dir", project_name)
     pretrained_model = config.model.pretrained_model
+    requested_device = config.training.get("device", "auto")
+    if requested_device == "npu":
+        import torch_npu  # Register NPU before Accelerator/device initialization.
+        if not torch.npu.is_available():
+            raise RuntimeError("NPU requested but unavailable; check CANN and torch_npu")
 
     # Enable TF32 on Ampere GPUs
-    if config.training.enable_tf32:
+    if config.training.enable_tf32 and requested_device != "npu" and torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
@@ -81,10 +86,14 @@ def main():
     accelerator = Accelerator(
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
         mixed_precision=config.training.mixed_precision,
-        log_with='wandb',
+        log_with='wandb' if config.wandb.get("enabled", True) else None,
         project_dir=config.experiment.logging_dir,
         split_batches=False,
     )
+    if requested_device == "npu" and accelerator.device.type != "npu":
+        raise RuntimeError(f"Expected NPU, got {accelerator.device}")
+    if requested_device == "npu" and accelerator.distributed_type != DistributedType.DEEPSPEED:
+        raise RuntimeError("Use tools/launch_npu.py: this SFT loop relies on DeepSpeed gradient accumulation")
 
     #####################################
     # SETUP LOGGING, SEED and CONFIG    #
@@ -100,7 +109,7 @@ def main():
     else:
         set_verbosity_error()
 
-    if accelerator.is_main_process:
+    if accelerator.is_main_process and config.wandb.get("enabled", True):
         resume_wandb_run = config.wandb.resume
         run_id = config.wandb.get("run_id", None)
         if run_id is None:
@@ -121,7 +130,8 @@ def main():
         print(wandb_init_kwargs)
         wandb.init(
             **wandb_init_kwargs,
-            config=wandb_config
+            config=wandb_config,
+            mode=config.wandb.get("mode", "online"),
         )
 
     if accelerator.is_main_process:
@@ -143,19 +153,41 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model, trust_remote_code=True)
     uni_prompting = UniversalPrompting(tokenizer, max_prompt_len=config.training.max_prompt_len,
                                        max_gen_length=config.training.max_gen_length,
-                                       ignore_id=-100)
+                                       ignore_id=-100,
+                                       max_seq_length=config.training.get("max_seq_length"),
+                                       mask_tool_responses=config.training.get("mask_tool_responses", True))
 
     #from transformers import AutoModelForCausalLM
     #model = AutoModelForCausalLM.from_pretrained(pretrained_model, trust_remote_code=True, torch_dtype="auto")
-    model = SDARForCausalLM.from_pretrained(pretrained_model, trust_remote_code=True, torch_dtype="auto")
+    # Check depth from metadata BEFORE constructing a model. A full checkpoint
+    # accidentally passed here must never allocate all its layers first.
+    from models.sdar.configuration_sdar import SDARConfig
+    model_config = SDARConfig.from_pretrained(pretrained_model)
+    expected_depth = config.model.get("reduction", {}).get("num_hidden_layers")
+    if expected_depth is not None and model_config.num_hidden_layers != expected_depth:
+        raise ValueError("Checkpoint depth does not match model.reduction.num_hidden_layers; run the export action first")
+    model, loading_info = SDARForCausalLM.from_pretrained(
+        pretrained_model, config=model_config, torch_dtype="auto", output_loading_info=True)
+    issues = {key: value for key, value in loading_info.items() if value}
+    if issues or len(model.model.layers) != model.config.num_hidden_layers:
+        raise RuntimeError(f"Checkpoint did not load completely: {issues}")
+    if requested_device == "npu":
+        # Avoid transferring file-mapped safetensors pages directly to the NPU.
+        # ZeRO-3 already manages partitioned parameter storage during loading.
+        if not any(hasattr(p, "ds_id") for p in model.parameters()):
+            with torch.no_grad():
+                for parameter in model.parameters():
+                    parameter.data = parameter.detach().to(device="cpu", copy=True)
+    logger.info(f"Loaded SDAR with {len(model.model.layers)} decoder layer(s)")
 
     # calculate loss ourselves, needs logits，so aviod fuse CE
     if hasattr(model, "config"):
         model.config.fuse_cross_entropy = False  
+        model.config.use_cache = False
     
 
     if config.training.gradient_checkpointing_enable:
-        model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         if hasattr(model, "config"):
             model.config.use_cache = False
     else:
@@ -184,6 +216,10 @@ def main():
         },
     ]
 
+    # SDAR without projection biases can have an empty no-decay group.
+    # DeepSpeed removes empty groups; create the scheduler against the same
+    # nonempty groups to avoid a param-group mismatch on newer PyTorch.
+    optimizer_grouped_parameters = [group for group in optimizer_grouped_parameters if group["params"]]
     optimizer_type = config.optimizer.name
     if optimizer_type == "adamw":
         optimizer = AdamW(
@@ -244,10 +280,19 @@ def main():
         prompt_list.append(x["prompt"])
         response_list.append(x["response"])
     input_ids_lm, _, start_pos, drop_num = uni_prompting((prompt_list, response_list))
+    dataset_load = [dataset_load[i] for i in uni_prompting.kept_indices]
+    if uni_prompting.stats:
+        logger.info(f"Sequence preprocessing: {uni_prompting.stats}")
+        if accelerator.is_main_process:
+            (Path(output_dir) / "preprocessing_report.json").write_text(
+                json.dumps(uni_prompting.stats, indent=2) + "\n")
     _, L = input_ids_lm.shape
     L0    = start_pos
     L1    = L - L0
     post_num = config.training.post_num
+    max_seq_length = config.training.get("max_seq_length")
+    if max_seq_length is not None and L0 + 2 * L1 > max_seq_length:
+        raise RuntimeError("Expanded sequence exceeds training.max_seq_length")
 
     for x in dataset_load:
         if "step_map" not in x.keys():
@@ -257,7 +302,7 @@ def main():
             if len(step_map_i) > L1:
                 step_map_i = step_map_i[:L1]
             else:
-                step_map_i = step_map_i + [max(step_map_i) + 1] * (L1 - len(step_map_i))
+                step_map_i = step_map_i + [max(step_map_i, default=-1) + 1] * (L1 - len(step_map_i))
             step_map_list.append(step_map_i)
     
     def make_basic_block_attention(
@@ -271,7 +316,7 @@ def main():
         assert L0 + 2 * L1 == N, "input length must be L0 + 2*L1"
 
         # all -inf first
-        bias = torch.full((B, 1, N, N), 0)
+        bias = torch.zeros((B, 1, N, N), dtype=torch.bool)
 
 
         rows = torch.arange(L0 + L1, L0 + 2 * L1)              # (L1,)
@@ -528,6 +573,10 @@ def main():
 
     
     extended_input_ids, p_mask, tok_idx_ext, labels = collect_training_data(input_ids_lm, step_map_list)
+    if not len(extended_input_ids):
+        raise ValueError("No supervised tokens survived noise sampling; check data and masking probabilities")
+    if max_seq_length is not None and extended_input_ids.shape[1] > max_seq_length:
+        raise RuntimeError("Actual model input exceeds training.max_seq_length")
 
 
 
@@ -650,17 +699,23 @@ def main():
                         tok_idx_ext=tok_idx_ext,
                         labels=labels
                     )
+            if not torch.isfinite(loss_lm.detach()).all():
+                raise FloatingPointError("Non-finite SFT loss")
+            optimizer_step_before = getattr(model, "global_steps", None)
             accelerator.backward(loss_lm)
             if config.training.max_grad_norm is not None:
                 accelerator.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
             # DeepSpeed's wrapped optimizer performs the configured accumulation
             # and only updates parameters on its accumulation boundary.
             optimizer.step()
-            lr_scheduler.step()
+            # Accelerate/DeepSpeed performs the real optimizer update inside
+            # backward(). Advance the external scheduler only on that boundary.
+            if optimizer_step_before is None or model.global_steps > optimizer_step_before:
+                lr_scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
             global_steps += 1
-            if accelerator.is_main_process:
+            if accelerator.is_main_process and config.wandb.get("enabled", True):
                 wandb.log({"train_loss": loss_lm.item()}, step=global_steps)
             progress_bar.set_postfix(loss=f"{loss_lm.item():.4f}")
         accelerator.wait_for_everyone()
@@ -670,6 +725,22 @@ def main():
     accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:
+        unwrapped = accelerator.unwrap_model(model)
+        report = {
+            "device": str(accelerator.device),
+            "distributed_type": str(accelerator.distributed_type),
+            "num_hidden_layers": len(unwrapped.model.layers),
+            "expanded_length": int(extended_input_ids.shape[1]),
+            "micro_steps": global_steps,
+            "optimizer_steps": int(getattr(model, "global_steps", global_steps)),
+            "scheduler_steps": int(getattr(getattr(lr_scheduler, "scheduler", lr_scheduler), "last_epoch", -1)),
+            "last_loss": float(loss_lm.detach()),
+        }
+        if accelerator.device.type == "npu":
+            report["peak_allocated_gib"] = torch.npu.max_memory_allocated() / 2**30
+        (Path(output_dir) / "training_report.json").write_text(json.dumps(report, indent=2) + "\n")
+
+    if accelerator.is_main_process and config.wandb.get("enabled", True):
         wandb.finish()
 
     accelerator.end_training()

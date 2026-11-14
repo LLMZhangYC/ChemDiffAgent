@@ -46,7 +46,10 @@ from transformers.processing_utils import Unpack
 from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, is_torch_flex_attn_available, logging
 from .configuration_sdar import SDARConfig
 
-from flash_attn.ops.triton.layer_norm import rms_norm_fn as flash_rms_norm
+try:
+    from flash_attn.ops.triton.layer_norm import rms_norm_fn as flash_rms_norm
+except ImportError:
+    flash_rms_norm = None
 
 import torch.nn.functional as F
 try:
@@ -81,6 +84,8 @@ class SDARRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
+        if hidden_states.device.type != "cuda" or flash_rms_norm is None:
+            return F.rms_norm(hidden_states, (hidden_states.shape[-1],), self.weight, self.variance_epsilon)
         return flash_rms_norm(
             hidden_states, weight=self.weight, bias=None, eps=self.variance_epsilon)
         '''
@@ -111,7 +116,7 @@ class SDARMLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        if liger_kernel_is_available:
+        if x.device.type == "cuda" and liger_kernel_is_available:
             return self.down_proj(LigerSiLUMulFunction.apply(self.gate_proj(x), self.up_proj(x)))
         else:
             down_proj = self.down_proj(self.act_fn(
@@ -338,7 +343,7 @@ class SDARAttention(nn.Module):
 
         bsz, q_len = input_shape
 
-        if q_len == 1 and past_key_value is not None:
+        if query_states.device.type == "cuda" and q_len == 1 and past_key_value is not None:
             # --- Decoding: flash-attn ---
             q = query_states.transpose(1, 2)  # [B,Q,H,D]
             k = key_states.transpose(1, 2)
