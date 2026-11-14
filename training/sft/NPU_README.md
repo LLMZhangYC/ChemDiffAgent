@@ -84,8 +84,9 @@ R_budget = min(max_gen_length, floor((8192 - P) / 2))
 
 ## 数值与验证范围
 
-NPU 使用 PyTorch RMSNorm、普通 SwiGLU 和携带原自定义 mask 的 SDPA；CUDA 分支保留原算子。
-原 CUDA 单 token / KV-cache 分支没有向 FlashAttention 传入自定义 mask，NPU SDPA 路径会遵循
+NPU 使用 `torch_npu.npu_rms_norm`、`torch_npu.npu_swiglu` 和携带原自定义 mask 的
+`torch_npu.npu_fusion_attention`；CPU/CUDA 分支保留原行为。
+原 CUDA 单 token / KV-cache 分支没有向 FlashAttention 传入自定义 mask，NPU 融合 attention 路径会遵循
 传入的 mask；带屏蔽位置的推理场景需另行对齐。这次 SFT 关闭 cache，不进入该解码分支。
 跨设备不承诺逐位相同。`tests/verify_npu_reference.py` 对随机小型一层模型进行
 CPU FP32 / NPU BF16 的 logits、loss、梯度和带 mask 的 KV cache 解码对照；
@@ -106,3 +107,59 @@ export PYTHONDONTWRITEBYTECODE=1
 验证结果和真实公开权重尚未覆盖的部分见 `NPU_VALIDATION.md`。
 
 原代码备份：`/data/hd/ChemDiffAgent-work/backups/before-npu-1l.tar.gz`。
+
+
+## Native NPU operator dependencies
+
+The NPU path uses `torch_npu.npu_rms_norm`, `torch_npu.npu_swiglu`, and
+`torch_npu.npu_fusion_attention` (training forward/backward, not inference FIA).
+Install a `torch-npu` wheel matching the server's PyTorch and CANN versions.
+CANN runtime/operator packages and the Ascend driver must also be installed;
+`op-plugin` supplies the adapter inside the torch_npu build and is not an extra
+Python package to pip-install. No FlashAttention, Liger, Triton, TorchAir,
+MindSpeed, or custom Kimi operators are required by these three calls.
+
+Attention uses BNSD with native GQA, `sparse_mode=0`, and an explicit bool mask.
+Model masks use True=visible; the wrapper inverts them to NPU True=blocked.
+The packed SwiGLU input is `[gate_proj(x), up_proj(x)]`; linear weights and
+checkpoint names are unchanged. Missing/incompatible NPU operators raise errors
+instead of silently reverting to SDPA.
+
+Source examples: Kimi K3 `models/modeling_dspark_common.py` RMSNorm/SwiGLU;
+attention follows the training API rather than Kimi's inference-only FIA.
+Run `tests/verify_npu_reference.py --help` for the existing device comparison
+entry point. The native operator replacement still requires target-device
+forward/backward and peak-memory validation; earlier SDPA results do not certify it.
+
+## Training profiling
+
+The one-layer smoke config enables `profiling.enabled`; other configs default to
+disabled when the section is absent. `train/profiling.py` follows the Kimi
+Level1/PipeUtilization setup and the training-side optimizer-step scheduling in
+`cann-recipes-train/llm_sft/DeepSpec/deepspec/utils/profiler_context.py`
+(reviewed commit `e71712609dc70d3046af4b7453b44a515751bd60`).
+
+With `training.max_steps=3`, `warmup=1`, `active=2`, `skip_first=0`, the first
+optimizer update warms up and the next two are recorded. All accumulated
+micro-batches are included between optimizer boundaries. Each epoch starts a
+fresh schedule. CPU/NPU activities are recorded, and the profiler closes before
+checkpoint saving, including on early exit; exceptions also exit the context.
+
+Relative `profiling.output_dir` is anchored to `experiment.output_dir`. Traces
+and version/schedule metadata are written to `prof/rank_N/epoch_E/`. Each rank
+records independently. The default disables shapes, memory tracing and stacks
+to reduce overhead; enable these options only when needed. The trace exporter
+does not require TensorBoard for collection.
+
+```bash
+bash scripts/train_sft_npu.sh runtime.action=train
+# Disable instrumentation for throughput measurements:
+bash scripts/train_sft_npu.sh runtime.action=train profiling.enabled=false
+# CPU lifecycle/configuration checks (does not validate the native profiler):
+python training/sft/tests/test_profiling.py
+```
+
+Requires the installed `torch_npu.profiler` and matching CANN profiling support;
+no Kimi/DeepSpec training framework is imported. Target-device trace generation
+still needs verification. Profiling adds overhead and should be disabled when
+estimating end-to-end training throughput.

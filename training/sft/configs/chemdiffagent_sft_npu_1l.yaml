@@ -67,6 +67,19 @@ lr_scheduler:
     warmup_steps: 0
     min_lr_scale: 1.0
 
+profiling:
+  enabled: true
+  output_dir: ./prof
+  # Schedule units are actual optimizer updates. Reset each epoch.
+  skip_first: 0
+  wait: 0
+  warmup: 1
+  active: 2
+  repeat: 1
+  record_shapes: false
+  profile_memory: false
+  with_stack: false
+
 runtime:
   # Use runtime.action=export to prepare weights, then runtime.action=train.
   action: train
