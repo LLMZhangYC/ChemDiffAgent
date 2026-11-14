@@ -114,8 +114,6 @@ def main():
         run_id = config.wandb.get("run_id", None)
         if run_id is None:
             resume_wandb_run = False
-            run_id = wandb.util.generate_id()
-            config.wandb.run_id = run_id
 
         wandb_init_kwargs = dict(
             project=config.experiment.project,
@@ -123,16 +121,22 @@ def main():
             name=config.experiment.get("run_name", "sft_sdar"),
             notes=f"Pretrained model: {pretrained_model}",
         )
+        if run_id is not None:
+            wandb_init_kwargs["id"] = run_id
+            if resume_wandb_run:
+                wandb_init_kwargs["resume"] = "allow"
 
         wandb_config = {k: v for k, v in flatten_omega_conf(config, resolve=True)}
         wandb_config.pop("experiment.resume_from_checkpoint", None)
         print("Wandb init kwargs:")
         print(wandb_init_kwargs)
-        wandb.init(
+        # Let the public SDK API generate missing IDs and record the actual run.
+        wandb_run = wandb.init(
             **wandb_init_kwargs,
             config=wandb_config,
             mode=config.wandb.get("mode", "online"),
         )
+        config.wandb.run_id = wandb_run.id
 
     if accelerator.is_main_process:
         os.makedirs(output_dir, exist_ok=True)
