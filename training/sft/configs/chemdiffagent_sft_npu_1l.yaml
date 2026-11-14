@@ -21,7 +21,15 @@ model:
     num_hidden_layers: 1
 
 dataset:
+  validation_fraction: 0.1
+  split_seed: 10086
+  validation_seed: 10087
   path: /data/hd/dataset/ChemDiffAgent/training/train.json
+
+validation:
+  # null means evaluate only at epoch end; integers count optimizer updates.
+  eval_steps: null
+  eval_after_epoch: true
 
 training:
   device: npu
