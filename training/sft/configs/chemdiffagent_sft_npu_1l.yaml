@@ -6,32 +6,36 @@ wandb:
 
 experiment:
   project: chemdiffagent-sft-npu-1l
-  output_dir: /data/hd/outputs/chemdiffagent-sft-npu-1l
+  # Resolve against the directory where the launch command is invoked.
+  output_dir: .
   run_name: chemdiffagent-sft-npu-1l
   num_node: 1
   checkpoints_total_limit: 3
 
 model:
-  pretrained_model: /data/hd/models/SDAR-1L
+  pretrained_model: /data/ChemDiffAgent/SDAR-1L
   optimized_name: optimized
   reduction:
-    # Set this AFTER importing the public, SDAR-compatible safetensors checkpoint.
-    source_model: null
+    # Export the retained layers from the local SDAR-compatible checkpoint.
+    source_model: /data/ChemDiffAgent/SDAR-8B-Chat
     # Retain the first N decoder blocks (N=1 means model.layers.0), plus embed/norm/head.
     num_hidden_layers: 1
 
 dataset:
-  path: /data/hd/dataset/ChemDiffAgent/training/train.json
+  path: /data/ChemDiffAgent/dataset/training/train.json
+  max_samples: 16
 
 training:
   device: npu
   gradient_checkpointing_enable: true
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 1
   batch_size_lm: 1
   mixed_precision: bf16
   enable_tf32: false
   seed: 10086
-  num_train_epochs: 3
+  num_train_epochs: 1
+  # Stop after three actual optimizer updates, then save a checkpoint.
+  max_steps: 3
   max_grad_norm: 1.0
   method: semi-ar
   mask_tool_responses: true
@@ -41,9 +45,10 @@ training:
   shrink: 1
   post_num: 0
   # Hard limit on the actual padded model input: P + R + noisy_R.
-  max_seq_length: 8192
-  max_prompt_len: 4096
-  max_gen_length: 8192
+  # Conservative starting point for a single 64 GB NPU without verified fused attention.
+  max_seq_length: 4096
+  max_prompt_len: 3072
+  max_gen_length: 2048
 
 optimizer:
   name: adamw
@@ -67,7 +72,7 @@ runtime:
   action: train
   python: /data/workspace/zyc/ChemDiffAgent/envs/sft/bin/python
   cann_root: /data/workspace/zyc/CANN/cann-9.3.0
-  work_dir: /data/hd/ChemDiffAgent-work
+  work_dir: /data/ChemDiffAgent/work/sft-npu-1l
   num_processes: 1
   # null respects ASCEND_RT_VISIBLE_DEVICES; set an ID or comma-separated IDs to pin.
   visible_devices: null

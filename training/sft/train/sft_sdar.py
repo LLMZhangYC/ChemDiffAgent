@@ -591,6 +591,12 @@ def main():
     num_update_steps_per_epoch = math.ceil(len(dataset_lm) / total_batch_size_lm)
     num_train_epochs = config.training.num_train_epochs
     max_train_steps = num_update_steps_per_epoch * num_train_epochs + 1
+    # Optional cap on actual optimizer updates, not forward/backward micro-steps.
+    max_optimizer_steps = config.training.get("max_steps")
+    if max_optimizer_steps is not None:
+        if isinstance(max_optimizer_steps, bool) or not isinstance(max_optimizer_steps, int) or max_optimizer_steps < 1:
+            raise ValueError("training.max_steps must be a positive integer or null")
+        max_train_steps = min(max_train_steps, max_optimizer_steps)
 
     lr_scheduler = get_scheduler(
         config.lr_scheduler.scheduler,
@@ -673,6 +679,7 @@ def main():
 
     from tqdm.auto import tqdm
     global_steps = 0
+    completed_optimizer_steps = 0
     for epoch in range(first_epoch, num_train_epochs):
         
         model.train()
@@ -716,14 +723,20 @@ def main():
             # backward(). Advance the external scheduler only on that boundary.
             if optimizer_step_before is None or model.global_steps > optimizer_step_before:
                 lr_scheduler.step()
+                completed_optimizer_steps += 1
             optimizer.zero_grad(set_to_none=True)
 
             global_steps += 1
             if accelerator.is_main_process and config.wandb.get("enabled", True):
                 wandb.log({"train_loss": loss_lm.item()}, step=global_steps)
             progress_bar.set_postfix(loss=f"{loss_lm.item():.4f}")
+            if max_optimizer_steps is not None and completed_optimizer_steps >= max_optimizer_steps:
+                logger.info(f"Reached training.max_steps={max_optimizer_steps}; saving and stopping")
+                break
         accelerator.wait_for_everyone()
         save_checkpoint(model, tokenizer, config, accelerator, config.model.optimized_name, epoch=epoch)
+        if max_optimizer_steps is not None and completed_optimizer_steps >= max_optimizer_steps:
+            break
 
     
     accelerator.wait_for_everyone()
@@ -736,6 +749,7 @@ def main():
             "num_hidden_layers": len(unwrapped.model.layers),
             "expanded_length": int(extended_input_ids.shape[1]),
             "micro_steps": global_steps,
+            "max_steps": max_optimizer_steps,
             "optimizer_steps": int(getattr(model, "global_steps", global_steps)),
             "scheduler_steps": int(getattr(getattr(lr_scheduler, "scheduler", lr_scheduler), "last_epoch", -1)),
             "last_loss": float(loss_lm.detach()),
