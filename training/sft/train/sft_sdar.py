@@ -11,8 +11,6 @@ import time
 from pathlib import Path
 from typing import Union
 
-import numpy as np
-from PIL import Image
 from omegaconf import OmegaConf
 import wandb
 import torch
