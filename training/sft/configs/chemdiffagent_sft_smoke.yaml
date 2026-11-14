@@ -1,0 +1,70 @@
+wandb:
+  enabled: true
+  mode: offline
+  entity: null
+  resume: false
+
+experiment:
+  project: chemdiffagent-sft-smoke
+  # Resolve against the directory where the launch command is invoked.
+  output_dir: .
+  run_name: chemdiffagent-sft-smoke
+  num_node: 1
+  checkpoints_total_limit: 3
+
+model:
+  pretrained_model: /data/ChemDiffAgent/SDAR-8B-Chat
+  optimized_name: optimized
+
+dataset:
+  path: /data/ChemDiffAgent/dataset/training/train.json
+  max_samples: 16
+
+
+training:
+  device: npu
+  gradient_checkpointing_enable: true
+  gradient_accumulation_steps: 1
+  batch_size_lm: 1
+  mixed_precision: bf16
+  enable_tf32: false
+  seed: 10086
+  num_train_epochs: 1
+  max_grad_norm: 1.0
+  method: semi-ar
+  mask_tool_responses: true
+  lower_p: 0.1
+  upper_p: 0.9
+  block_size: 128
+  shrink: 1
+  post_num: 0
+  # Actual padded model input: prompt + clean response + noisy response.
+  max_seq_length: 1280
+  max_gen_length: 512
+  max_prompt_len: 256
+
+optimizer:
+  name: adamw
+  params:
+    learning_rate: 1.0e-5
+    scale_lr: false
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 0.0
+    epsilon: 1.0e-8
+
+lr_scheduler:
+  scheduler: cosine
+  params:
+    learning_rate: ${optimizer.params.learning_rate}
+    warmup_steps: 0
+    min_lr_scale: 1.0
+
+runtime:
+  action: train
+  python: /data/workspace/zyc/ChemDiffAgent/envs/sft/bin/python
+  cann_root: /data/workspace/zyc/CANN/cann-9.3.0
+  work_dir: /data/ChemDiffAgent/work/sft-smoke
+  num_processes: 8
+  visible_devices: null
+  main_process_port: 29537

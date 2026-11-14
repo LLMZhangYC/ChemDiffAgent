@@ -14,6 +14,8 @@ def main():
     cli = OmegaConf.from_cli()
     path = Path(cli.get("config", root / "configs/chemdiffagent_sft_npu_1l.yaml")).resolve()
     config = OmegaConf.merge(OmegaConf.load(path), cli)
+    # Preserve the caller's output directory before the subprocess changes cwd.
+    config.experiment.output_dir = str(Path(config.experiment.output_dir).expanduser().resolve())
     action = config.runtime.get("action", "train")
     if action not in ("train", "export"):
         raise ValueError("runtime.action must be train or export")

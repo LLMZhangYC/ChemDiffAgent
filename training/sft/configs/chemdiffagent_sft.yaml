@@ -10,11 +10,12 @@ experiment:
   checkpoints_total_limit: 3
 
 model:
-  pretrained_model: JetLM/SDAR-8B-Chat
+  pretrained_model: /data/ChemDiffAgent/SDAR-8B-Chat
   optimized_name: optimized
 
 dataset:
-  path: /path/to/ChemDiffAgent/training/train.json
+  path: /data/ChemDiffAgent/dataset/training/train.json
+
 
 training:
   gradient_checkpointing_enable: true
