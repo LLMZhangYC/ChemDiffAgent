@@ -1,5 +1,22 @@
 # NPU inference
 
+## 性能采集配置
+
+```bash
+bash scripts/run_inference_npu.sh inference/configs/inference_npu_smoke.yaml
+```
+
+smoke 配置按数据集顺序跑 single_test 的前 8 条，每条 1 次 rollout，保留正式
+推理的模型、block length、去噪步数和生成长度上限。prefill / denoise 各自先预热
+2 次 forward，再分别采集 5 次，之后继续完成这 8 条。若实际执行次数不足，
+对应阶段只能产生已执行次数的 trace；性能采集开销不能当作端到端吞吐。
+输出位于启动目录的 `res/<datetime>-inference_npu_smoke/`。
+
+完整测试仍使用 `inference_npu.yaml`（max_samples=0），输出在
+`res/<datetime>-inference_npu/`。其中 `single_test.jsonl` 每完成一条 rollout 就写入并
+flush，包含逐条推理结果；`run.log` 保存终端输出和最终计数，`config.yaml` 和
+`commands.txt` 保存启动配置与命令，`prof/` 保存 trace。
+
 ## YAML 一键启动
 
 编辑 `inference/configs/inference_npu.yaml` 中的 Python、CANN、模型和数据路径，然后：
