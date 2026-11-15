@@ -6,7 +6,6 @@ safetensors
 tqdm
 huggingface-hub
 omegaconf
-wandb
 
 # NPU native RMSNorm, SwiGLU and masked attention require torch-npu plus matching
 # PyTorch, CANN runtime/operator packages and driver. Install the matching torch-npu

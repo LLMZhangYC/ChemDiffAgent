@@ -62,6 +62,7 @@ class ProfilingTests(unittest.TestCase):
             class Tensor:
                 def to(self, *a): return self
                 def detach(self): return self
+                def float(self): return self
                 def item(self): return 1.0
             class Progress(list):
                 def set_postfix(self, **kw): pass
@@ -84,17 +85,18 @@ class ProfilingTests(unittest.TestCase):
             batch = {k: Tensor() for k in ["extended_input_ids", "p_mask", "tok_idx_ext", "labels"]}
             env = dict(first_epoch=0, num_train_epochs=5, model=model, global_steps=0,
                        completed_optimizer_steps=0, max_optimizer_steps=cap, output_dir=".", tokenizer=None,
+                       validation_enabled=False, metrics_logger=NS(log=lambda *a, **kw: None),
                        tqdm=lambda data, **kw: Progress(data), train_dataloader_lm=[batch]*10,
                        create_profiler=profiler_factory, time=NS(time=lambda: 0), end=0,
                        data_time_m=NS(update=lambda x: None), forward_process=lambda **kw: Tensor(),
                        torch=NS(isfinite=lambda x: NS(all=lambda: True)), logger=NS(info=lambda x: None),
-                       optimizer=NS(step=lambda: None, zero_grad=lambda **kw: None),
+                       optimizer=NS(step=lambda: None, zero_grad=lambda **kw: None, param_groups=[{"lr": 1e-5}]),
                        lr_scheduler=NS(step=lambda: None),
                        save_checkpoint=lambda *a, **kw: events.append("save"),
                        config=NS(get=lambda *a: {"enabled": True}, training=NS(max_grad_norm=1),
-                                 wandb=NS(get=lambda *a: False), model=NS(optimized_name="optimized")),
+                                 model=NS(optimized_name="optimized")),
                        accelerator=NS(device=NS(type="npu"), process_index=0, num_processes=1, is_local_main_process=True,
-                                      is_main_process=True, backward=backward,
+                                      is_main_process=True, backward=backward, reduce=lambda value, **kw: value,
                                       clip_grad_norm_=lambda *a: None, wait_for_everyone=lambda: None))
             exec(compile(ast.Module(body=[loop], type_ignores=[]), str(path), "exec"), env)
             saves = 1 if cap else 5
