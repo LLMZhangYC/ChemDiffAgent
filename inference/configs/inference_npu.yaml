@@ -1,0 +1,37 @@
+# Relative model/data paths use the repository root; results use ./res/<datetime>-<config>/.
+runtime:
+  # Python in the NPU environment; no conda activation required.
+  # Omit python to use the container's current interpreter.
+  cann_env: /usr/local/Ascend/cann/set_env.sh
+  env:
+    RXN_T5CHEM_DEVICE: cpu
+model:
+  path: /data/ChemDiffAgent/SDAR-8B-Chat
+data:
+  directory: /data/ChemDiffAgent/dataset/benchmark
+  datasets: [single_test]
+inference:
+  device: npu:0
+  dtype: bf16
+  max_samples: 0  # Run the full single_test dataset
+  max_turns: 7
+  max_new_tokens: 1024
+  max_context_tokens: 32768
+  block_length: 64
+  denoising_steps: 64
+  temperature: 1.0
+  top_k: 1
+  top_p: 1.0
+  remasking_strategy: low_confidence_static
+  confidence_threshold: 0.9
+  tool_timeout_seconds: 120
+  resume: false
+  print_turns: true
+  seed: 10086
+profiling:
+  enabled: true
+  phase: both  # both: independently capture prefill and denoise in one run
+  output_dir: prof  # Relative to this run's res directory; dataset name is appended
+  skip_first: 0
+  warmup: 1
+  active: 2

@@ -41,7 +41,8 @@ class WindowProfiler:
                 self.__exit__(None, None, None)
 
 
-def create_profiler(settings, output_dir, rank, device_type, epoch, world_size=1):
+def create_profiler(settings, output_dir, rank, device_type, epoch, world_size=1,
+                    schedule_unit="optimizer_step"):
     """Create the first epoch's finite window; one step is one optimizer update.
 
     Matches Kimi's Level1/PipeUtilization setup. Relative output paths are
@@ -50,7 +51,7 @@ def create_profiler(settings, output_dir, rank, device_type, epoch, world_size=1
     if not settings.get("enabled", False):
         return DisabledProfiler()
     if device_type != "npu":
-        raise ValueError("NPU profiling requires an NPU training device")
+        raise ValueError("NPU profiling requires an NPU device")
 
     window = {}
     for name, default, minimum in (("skip_first", 0, 0), ("wait", 0, 0),
@@ -73,7 +74,7 @@ def create_profiler(settings, output_dir, rank, device_type, epoch, world_size=1
     except PackageNotFoundError:
         torch_version = None
     metadata = {"rank": rank, "world_size": world_size, "epoch": epoch,
-                "schedule_unit": "optimizer_step", "schedule": window,
+                "schedule_unit": schedule_unit, "schedule": window,
                 "torch_version": torch_version,
                 "torch_npu_version": getattr(torch_npu, "__version__", None)}
     (directory / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")

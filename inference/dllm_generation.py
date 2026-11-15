@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -77,6 +78,7 @@ class BlockDiffusionGenerator:
         remasking_strategy: str = "low_confidence_static",
         confidence_threshold: float = 0.9,
         max_context_tokens: int = 32768,
+        profiler: Any = None,
     ):
         if block_length < 1:
             raise ValueError("block_length must be positive")
@@ -87,6 +89,7 @@ class BlockDiffusionGenerator:
         }:
             raise ValueError(f"Unsupported remasking strategy: {remasking_strategy}")
         self.model = model
+        self.profiler = profiler
         self.tokenizer = tokenizer
         self.device = device
         self.block_length = int(block_length)
@@ -195,7 +198,7 @@ class BlockDiffusionGenerator:
             prefill_mask = self._prefill_mask(prefill_length)
             # Calling the base model avoids materializing prompt-length
             # vocabulary logits (over 1 GiB for a long prompt).
-            self.model.model(
+            self._forward(self.model.model, phase="prefill",
                 input_ids=input_ids,
                 attention_mask=prefill_mask,
                 position_ids=position_ids,
@@ -235,7 +238,7 @@ class BlockDiffusionGenerator:
                 mask = current.eq(self.mask_id)
                 if not bool(mask.any().item()):
                     break
-                output = self.model(
+                output = self._forward(self.model, phase="denoise",
                     input_ids=current,
                     attention_mask=decode_mask,
                     position_ids=block_positions,
@@ -270,7 +273,7 @@ class BlockDiffusionGenerator:
             # pass so masks never leak into the transcript.
             remaining_mask = current.eq(self.mask_id)
             if bool(remaining_mask.any().item()):
-                output = self.model(
+                output = self._forward(self.model, phase="denoise",
                     input_ids=current,
                     attention_mask=decode_mask,
                     position_ids=block_positions,
@@ -298,7 +301,7 @@ class BlockDiffusionGenerator:
                 break
 
             # Commit the complete block to the KV cache for the next block.
-            self.model.model(
+            self._forward(self.model.model, phase="cache_commit",
                 input_ids=current,
                 attention_mask=decode_mask,
                 position_ids=block_positions,
@@ -309,3 +312,11 @@ class BlockDiffusionGenerator:
             cached_length += model_block_length
 
         return self.tokenizer.decode(generated[:requested], skip_special_tokens=False)
+
+    def _forward(self, model, phase="denoise", **kwargs):
+        scoped = self.profiler is not None and hasattr(self.profiler, "forward")
+        with self.profiler.forward(phase) if scoped else nullcontext():
+            output = model(**kwargs)
+        if self.profiler is not None and not scoped:
+            self.profiler.step()
+        return output

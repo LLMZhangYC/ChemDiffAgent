@@ -31,6 +31,7 @@ TOP_K=${TOP_K:-1}
 REMASKING_STRATEGY=${REMASKING_STRATEGY:-low_confidence_static}
 CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.9}
 DTYPE=${DTYPE:-bf16}
+DEVICE=${DEVICE:-cuda:0}
 TOOL_TIMEOUT_SECONDS=${TOOL_TIMEOUT_SECONDS:-120}
 RESUME=${RESUME:-0}
 PRINT_TURNS=${PRINT_TURNS:-0}
@@ -51,6 +52,7 @@ for dataset in "${DATASET_NAMES[@]}"; do
         --output "${output_path}"
         --model-path "${MODEL_PATH}"
         --dtype "${DTYPE}"
+        --device "${DEVICE}"
         --max-samples "${MAX_SAMPLES}"
         --num-rolls "${NUM_ROLLS}"
         --max-turns "${MAX_TURNS}"
@@ -68,6 +70,12 @@ for dataset in "${DATASET_NAMES[@]}"; do
     [[ -n "${SAMPLE_ID}" ]] && args+=(--sample-id "${SAMPLE_ID}")
     [[ "${RESUME}" != "0" ]] && args+=(--resume)
     [[ "${PRINT_TURNS}" != "0" ]] && args+=(--print-turns)
+    if [[ "${PROFILE:-0}" != "0" ]]; then
+        args+=(--profile --profile-dir "${PROFILE_DIR:-prof/${dataset}}"
+            --profile-skip-first "${PROFILE_SKIP_FIRST:-0}"
+            --profile-warmup "${PROFILE_WARMUP:-1}"
+            --profile-active "${PROFILE_ACTIVE:-2}")
+    fi
 
     echo "[DLLM] dataset=${dataset} model=${MODEL_PATH} gpu=${CUDA_VISIBLE_DEVICES}"
     conda run --no-capture-output -n "${CONDA_ENV}" \
