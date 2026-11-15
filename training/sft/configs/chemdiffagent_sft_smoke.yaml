@@ -6,8 +6,8 @@ wandb:
 
 experiment:
   project: chemdiffagent-sft-smoke
-  # Resolve against the directory where the launch command is invoked.
-  output_dir: .
+  run_dir: ./runs/${experiment.run_name}
+  output_dir: ${experiment.run_dir}/output
   run_name: chemdiffagent-sft-smoke
   num_node: 1
   checkpoints_total_limit: 3
@@ -68,7 +68,7 @@ runtime:
   action: train
   python: /data/workspace/zyc/ChemDiffAgent/envs/sft/bin/python
   cann_root: /data/workspace/zyc/CANN/cann-9.3.0
-  work_dir: /data/ChemDiffAgent/work/sft-smoke
+  work_dir: ${experiment.run_dir}/work
   num_processes: 8
   visible_devices: null
   main_process_port: 29537

@@ -25,6 +25,7 @@ from accelerate.utils import DistributedType, set_seed
 from models import SDARForCausalLM
 from transformers import AutoTokenizer
 from train.prompting_utils import UniversalPrompting
+from train.checkpointing import prune_checkpoints, validate_checkpoint_limit
 from train.profiling import create_profiler
 from models.lr_schedulers import get_scheduler
 from models.logging import set_verbosity_info, set_verbosity_error
@@ -782,17 +783,7 @@ def save_checkpoint(model, tokenizer, config, accelerator, name, epoch=None):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     checkpoints_total_limit = config.experiment.get("checkpoints_total_limit", None)
-
-    if accelerator.is_main_process and checkpoints_total_limit is not None:
-        ckpts = sorted(
-            [d for d in output_dir.iterdir() if d.name.startswith("checkpoint")],
-            key=lambda p: int(p.name.split("-")[1]),
-        )
-        if len(ckpts) >= checkpoints_total_limit:
-            to_remove = ckpts[: len(ckpts) - checkpoints_total_limit + 1]
-            logger.info(f"removing checkpoints: {', '.join(p.name for p in to_remove)}")
-            for p in to_remove:
-                shutil.rmtree(p, ignore_errors=True)
+    validate_checkpoint_limit(checkpoints_total_limit)
     ckpt_name = f"ckpt_{epoch}" if epoch is not None else "ckpt"
     save_base = output_dir / ckpt_name
     save_base.mkdir(exist_ok=True)
@@ -849,6 +840,10 @@ def save_checkpoint(model, tokenizer, config, accelerator, name, epoch=None):
             json.dump(metadata, f, indent=2)
 
         logger.info(f"Saved model + tokenizer to {save_dir}")
+        removed = prune_checkpoints(output_dir, checkpoints_total_limit, save_base.name)
+        if removed:
+            logger.info(f"Removed old checkpoints: {', '.join(removed)}")
+    accelerator.wait_for_everyone()
 
 if __name__ == "__main__":
     main()

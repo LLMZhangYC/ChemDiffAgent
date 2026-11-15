@@ -1,0 +1,97 @@
+# Full SDAR checkpoint, all training records, 3 epochs on NPU 0-7.
+# No checkpoint export or layer reduction is performed by this configuration.
+# Activate the target machine's training environment before launching:
+#   export CHEMDIFF_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+# Check model.pretrained_model, dataset.path and runtime.cann_root on the new machine.
+
+experiment:
+  project: chemdiffagent-sft
+  run_dir: ./runs/${experiment.run_name}
+  output_dir: ${experiment.run_dir}/output
+  run_name: chemdiffagent-sft-full-npu
+  num_node: 1
+  checkpoints_total_limit: 3
+
+model:
+  # Point to the complete SDAR-8B-Chat checkpoint, including tokenizer files.
+  pretrained_model: /data/ChemDiffAgent/SDAR-8B-Chat
+  optimized_name: optimized
+
+dataset:
+  validation_fraction: 0.1
+  split_seed: 10086
+  validation_seed: 10087
+  path: /data/ChemDiffAgent/dataset/training/train.json
+  # null uses all records instead of the 16-record smoke subset.
+  max_samples: null
+
+validation:
+  eval_steps: null
+  eval_after_epoch: true
+
+training:
+  device: npu
+  gradient_checkpointing_enable: true
+  gradient_accumulation_steps: 16
+  batch_size_lm: 1
+  mixed_precision: bf16
+  enable_tf32: false
+  seed: 10086
+  num_train_epochs: 3
+  max_steps: null
+  max_grad_norm: 1.0
+  method: semi-ar
+  mask_tool_responses: true
+  lower_p: 0.1
+  upper_p: 0.9
+  block_size: 128
+  shrink: 1
+  post_num: 0
+  # No cap on the actual model input: prompt + response + noisy response.
+  max_seq_length: null
+  # The existing preprocessing requires integer limits. These large limits
+  # preserve the original data; padding still follows observed data lengths.
+  max_prompt_len: 2147483647
+  max_gen_length: 2147483647
+
+optimizer:
+  name: adamw
+  params:
+    learning_rate: 1.0e-5
+    scale_lr: false
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 0.0
+    epsilon: 1.0e-8
+
+lr_scheduler:
+  scheduler: cosine
+  params:
+    learning_rate: ${optimizer.params.learning_rate}
+    warmup_steps: 0
+    min_lr_scale: 1.0
+
+profiling:
+  enabled: true
+  output_dir: ./prof
+  # First epoch only. Each profiler step is one optimizer update (16 micro-steps).
+  skip_first: 0
+  wait: 0
+  warmup: 1
+  active: 1
+  repeat: 1
+  record_shapes: false
+  profile_memory: false
+  with_stack: false
+
+runtime:
+  action: train
+  # Use the same interpreter as scripts/train_sft_npu.sh on the target machine.
+  python: ${oc.env:CHEMDIFF_PYTHON}
+  # Directory containing set_env.sh. Edit the default for the new machine,
+  # or reuse CHEMDIFF_CANN_ROOT if it was set during environment setup.
+  cann_root: ${oc.env:CHEMDIFF_CANN_ROOT,/usr/local/Ascend/ascend-toolkit/latest}
+  work_dir: ${experiment.run_dir}/work
+  num_processes: 8
+  visible_devices: "0,1,2,3,4,5,6,7"
+  main_process_port: 29537
