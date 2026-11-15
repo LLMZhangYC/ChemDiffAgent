@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from train.validation import evaluate, split_training_data
+from train.metrics import MetricsLogger
 from train.profiling import DisabledProfiler
 
 
@@ -170,27 +171,33 @@ class ActualSFTFunctionsTests(unittest.TestCase):
                     micro[0] += 1
                     if micro[0] % 2 == 0:
                         model.global_steps += 1
-                config = NS(get=lambda *a: {}, training=NS(max_grad_norm=None), wandb={"enabled": False},
+                config = NS(get=lambda *a: {}, training=NS(max_grad_norm=None),
                             model=NS(optimized_name="optimized"))
                 batch = {name: torch.ones(1) for name in ["extended_input_ids", "p_mask", "tok_idx_ext", "labels"]}
                 namespace = dict(first_epoch=0, num_train_epochs=2, model=model, config=config,
                     torch=torch, json=json, Path=Path, output_dir=directory, tokenizer=None,
-                    validation_enabled=enabled, validation_config={"eval_after_epoch": after_epoch},
+                    metrics_logger=MetricsLogger(directory), validation_enabled=enabled, validation_config={"eval_after_epoch": after_epoch},
                     eval_steps=interval, validation_dataloader=[], max_optimizer_steps=cap,
                     create_profiler=lambda *a, **kw: DisabledProfiler(),
                     evaluate=lambda *a: {"loss": 1, "masked_accuracy": .5},
                     forward_process=lambda **kw: torch.tensor(1.),
                     tqdm=lambda data, **kw: Progress(data), train_dataloader_lm=[batch]*(8 if cap else 4),
                     data_time_m=NS(update=lambda x: None), time=NS(time=lambda: 0), end=0,
-                    optimizer=NS(step=lambda: None, zero_grad=lambda **kw: None),
+                    optimizer=NS(step=lambda: None, zero_grad=lambda **kw: None, param_groups=[{"lr": 1e-5}]),
                     lr_scheduler=NS(step=lambda: None), logger=NS(info=lambda x: None),
                     save_checkpoint=lambda *a, **kw: None,
                     accelerator=NS(device=torch.device("cpu"), process_index=0, num_processes=1,
                                    is_local_main_process=True, is_main_process=True,
-                                   backward=backward, wait_for_everyone=lambda: None))
+                                   backward=backward, reduce=lambda value, **kw: value, wait_for_everyone=lambda: None))
                 exec(code, namespace)
                 history = namespace["exercise"]()
                 self.assertEqual([row["optimizer_step"] for row in history], expected)
+                logged = [json.loads(line) for line in (Path(directory)/"metrics.jsonl").read_text().splitlines()]
+                training_rows = [r for r in logged if r["phase"] == "train"]
+                validation_rows = [r for r in logged if r["phase"] == "validation"]
+                self.assertEqual(len(training_rows), 6 if cap else 8)
+                self.assertEqual([r["micro_step"] for r in training_rows], list(range(1, len(training_rows)+1)))
+                self.assertEqual([r["optimizer_step"] for r in validation_rows], expected)
                 if expected:
                     lines = (Path(directory)/"validation_metrics.jsonl").read_text().splitlines()
                     self.assertEqual(len(lines), len(expected))

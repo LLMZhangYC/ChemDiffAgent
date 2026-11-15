@@ -1,10 +1,7 @@
-wandb:
-  entity: null
-  resume: false
-
 experiment:
   project: chemdiffagent-sft
-  output_dir: ./outputs/chemdiffagent-sft
+  run_dir: ./runs/${experiment.run_name}
+  output_dir: ${experiment.run_dir}/output
   run_name: chemdiffagent-sft
   num_node: 1
   checkpoints_total_limit: 3

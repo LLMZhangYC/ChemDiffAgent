@@ -1,13 +1,7 @@
-wandb:
-  enabled: true
-  mode: offline
-  entity: null
-  resume: false
-
 experiment:
   project: chemdiffagent-sft-npu-1l
-  # Resolve against the directory where the launch command is invoked.
-  output_dir: .
+  run_dir: ./runs/${experiment.run_name}
+  output_dir: ${experiment.run_dir}/output
   run_name: chemdiffagent-sft-npu-1l
   num_node: 1
   checkpoints_total_limit: 3
@@ -96,7 +90,7 @@ runtime:
   action: train
   python: /data/workspace/zyc/ChemDiffAgent/envs/sft/bin/python
   cann_root: /data/workspace/zyc/CANN/cann-9.3.0
-  work_dir: /data/ChemDiffAgent/work/sft-npu-1l
+  work_dir: ${experiment.run_dir}/work
   num_processes: 1
   # null respects ASCEND_RT_VISIBLE_DEVICES; set an ID or comma-separated IDs to pin.
   visible_devices: null

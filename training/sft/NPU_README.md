@@ -1,7 +1,7 @@
 # SDAR 一层 SFT / NPU
 
 本实现继续使用 `train/sft_sdar.py`、SDAR 模型类、Accelerate 和 DeepSpeed ZeRO-3。
-模型权重先离线抽取，再交给原 SFT 入口训练。项目、输出和缓存位于 `/data/hd`；
+模型权重先离线抽取，再交给原 SFT 入口训练。每次实验的输出和运行文件放在同一 run 目录；
 复用服务器上已有的 Python 环境与 CANN，不安装或修改其依赖。
 下列命令均在 `zyc` 容器中执行。
 
@@ -41,7 +41,7 @@ Accelerate 配置，防止两份配置不一致。不要直接用普通单卡 Ac
 现有环境默认是 `/data/workspace/zyc/ChemDiffAgent/envs/sft/bin/python`。
 如更换环境，同时设置 shell 的 `CHEMDIFF_PYTHON`（启动器解释器）和配置中的
 `runtime.python`（训练解释器）。CANN 路径由 `runtime.cann_root` 控制。
-默认 wandb 为离线模式，可设置 `wandb.enabled=false` 完全关闭记录。
+SFT 指标直接写入 `experiment.output_dir/metrics.jsonl`，不再使用 W&B。
 
 ## 减层含义和权重读取
 
@@ -187,11 +187,59 @@ bash scripts/train_sft_npu.sh config=training/sft/configs/chemdiffagent_sft_full
 Check the startup banner for `epochs=1 max_steps=3 gradient_accumulation_steps=1`.
 Check the final log for `Reached training.max_steps=3; saving and stopping`.
 
-On the validation branch, `chemdiffagent_sft_full_npu_3steps.yaml` additionally
+`chemdiffagent_sft_full_npu_3steps.yaml` additionally
 sets `validation.eval_steps: 3`. It runs one held-out evaluation after the third
 optimizer update, then saves and exits without evaluating the same state twice.
 `chemdiffagent_sft_full_npu.yaml` retains `validation.eval_steps: null` and
 `eval_after_epoch: true`, so normal full training validates only at epoch end.
+
+
+## Checkpoint retention
+
+`experiment.checkpoints_total_limit` must be a positive integer or null (unlimited).
+After rank zero successfully saves the model, tokenizer and metadata, retention
+removes the oldest direct `ckpt_<integer>` directories by numeric epoch order.
+The just-saved directory is always protected. With five epochs and limit 3,
+`ckpt_2`, `ckpt_3`, and `ckpt_4` remain. Re-saving an existing directory does not
+reserve an extra checkpoint slot. Unnumbered `ckpt`, unrelated directories,
+files, symlinks and junctions are excluded. No old checkpoint is removed when
+the new save fails; there may briefly be limit+1 checkpoints during saving.
+All ranks wait for saving/cleanup before continuing. Existing checkpoint
+contents still contain model/tokenizer exports, not full optimizer state.
+
+Run `python training/sft/tests/test_checkpointing.py` for retention tests.
+
+
+## Experiment directories
+
+All SFT recipes now define a common parent:
+
+```yaml
+experiment:
+  run_name: chemdiffagent-sft-full-npu-3steps
+  run_dir: ./runs/${experiment.run_name}
+  output_dir: ${experiment.run_dir}/output
+runtime:
+  work_dir: ${experiment.run_dir}/work
+```
+
+`run_dir` is resolved relative to the directory where the NPU launcher is invoked,
+before the subprocess changes cwd. `output/` contains checkpoints, training
+reports, split/validation records when enabled, and `prof/`. `work/` contains
+resolved launch YAMLs, caches, temporary files and Ascend runtime logs. Existing
+artifacts are not moved. Cache storage remains per experiment in this change.
+
+```bash
+bash scripts/train_sft_npu.sh config=training/sft/configs/chemdiffagent_sft_full_npu_3steps.yaml
+# Change only the common parent:
+bash scripts/train_sft_npu.sh experiment.run_dir=/data/hd/runs/experiment-001
+```
+
+Reusing a run_name/run_dir reuses its checkpoint paths; choose a new run_name or
+run_dir to preserve a separate experiment. No timestamp is added automatically.
+For the generic `scripts/train_sft.sh`, use RUN_NAME/RUN_DIR/OUTPUT_DIR to override
+the defaults. Checkpoints are exports rather than exact optimizer-state resumes.
+
 
 ## SFT training/validation split
 
@@ -223,3 +271,29 @@ history in `training_report.json`. Checkpoints remain saved at epoch boundaries;
 validation does not automatically select or overwrite a best checkpoint.
 Older external configs without `validation_fraction` retain training-only behavior.
 The CPU tests run with `python training/sft/tests/test_validation.py`.
+
+
+## Local train/validation loss history
+
+SFT no longer imports or requires Weights & Biases. No account, network access,
+or binary log reader is needed. Each micro-step appends a `phase: train` record
+to `experiment.output_dir/metrics.jsonl`. Every validation appends a
+`phase: validation` record to the same file and still writes the existing
+`validation_metrics.jsonl`. Logs are closed after each record for immediate reads.
+
+Records include `run_id`, zero-based `epoch`, one-based `micro_step`,
+`optimizer_step`, and `loss`. Train records also include `learning_rate`.
+Train loss is the mean of rank-local batch losses across ranks; validation loss
+retains its existing response-normalized definition and distributed de-duplication.
+Only rank zero writes files. Repeated runs in the same output directory append
+with distinct `run_id` values; `training_report.json` records the current
+`metrics_run_id`. Filter by run_id and phase before plotting.
+
+Existing W&B run files are left untouched. This change does not convert past
+binary histories or alter VRPO logging. External YAMLs with obsolete `wandb`
+sections are accepted but those sections are ignored by SFT.
+
+```json
+{"run_id":"example","phase":"train","epoch":0,"micro_step":3,"optimizer_step":3,"loss":1.15,"learning_rate":0.00001}
+{"run_id":"example","phase":"validation","epoch":0,"micro_step":3,"optimizer_step":3,"loss":1.21,"masked_accuracy":0.4}
+```
