@@ -28,11 +28,11 @@ from typing import Any, Callable, Iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CATALOG_PATH = PROJECT_ROOT / "inference/assets/tool_catalog.json"
-CHEMTOOL_AGENT_ROOT = PROJECT_ROOT / "third_party/ChemToolAgent"
+CHEMTOOL_AGENT_ROOT = Path(os.getenv("CHEMTOOL_AGENT_ROOT", str(PROJECT_ROOT / "third_party/ChemToolAgent"))).expanduser().resolve()
 DEFAULT_T5CHEM_ROOT = PROJECT_ROOT / "third_party/t5chem"
-CONTROLLED_CHEMICALS_CSV = (
+CONTROLLED_CHEMICALS_CSV = Path(os.getenv("CONTROLLED_CHEMICALS_CSV", str(
     PROJECT_ROOT / "third_party/ChemistryAgent/agent/toolpool/chemcrow/data/chem_wep_smi.csv"
-)
+))).expanduser().resolve()
 
 
 class ToolBackendUnavailable(RuntimeError):

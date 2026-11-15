@@ -1,0 +1,37 @@
+# Performance capture on the first 8 single_test samples, in dataset order.
+# Keep model and generation shapes identical to the full inference config.
+runtime:
+  cann_env: /usr/local/Ascend/cann/set_env.sh
+  env:
+    RXN_T5CHEM_DEVICE: cpu
+model:
+  path: /data/ChemDiffAgent/SDAR-8B-Chat
+data:
+  directory: /data/ChemDiffAgent/dataset/benchmark
+  datasets: [single_test]
+inference:
+  device: npu:0
+  dtype: bf16
+  max_samples: 8
+  num_rolls: 1
+  max_turns: 7
+  max_new_tokens: 1024
+  max_context_tokens: 32768
+  block_length: 64
+  denoising_steps: 64
+  temperature: 1.0
+  top_k: 1
+  top_p: 1.0
+  remasking_strategy: low_confidence_static
+  confidence_threshold: 0.9
+  tool_timeout_seconds: 120
+  resume: false
+  print_turns: false
+  seed: 10086
+profiling:
+  enabled: true
+  phase: both
+  output_dir: prof
+  skip_first: 0
+  warmup: 2
+  active: 5
