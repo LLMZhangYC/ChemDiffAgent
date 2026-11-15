@@ -21,7 +21,7 @@ dataset:
   split_seed: 10086
   validation_seed: 10087
   path: /data/ChemDiffAgent/dataset/training/train.json
-  max_samples: 16
+  max_samples: 32
 
 
 validation:
@@ -38,6 +38,7 @@ training:
   enable_tf32: false
   seed: 10086
   num_train_epochs: 1
+  max_steps: 3
   max_grad_norm: 1.0
   method: semi-ar
   mask_tool_responses: true
@@ -47,9 +48,9 @@ training:
   shrink: 1
   post_num: 0
   # Actual padded model input: prompt + clean response + noisy response.
-  max_seq_length: 1280
+  max_seq_length: 4096
   max_gen_length: 512
-  max_prompt_len: 256
+  max_prompt_len: 3072
 
 optimizer:
   name: adamw
@@ -69,6 +70,9 @@ lr_scheduler:
     min_lr_scale: 1.0
 
 runtime:
+  env:
+    OTEL_SDK_DISABLED: "true"
+    OTEL_METRICS_EXPORTER: "none"
   action: train
   python: /data/workspace/zyc/ChemDiffAgent/envs/sft/bin/python
   cann_root: /data/workspace/zyc/CANN/cann-9.3.0

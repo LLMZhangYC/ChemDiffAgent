@@ -22,6 +22,12 @@ def main():
     work = Path(config.runtime.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
+    for key, value in config.runtime.get("env", {}).items():
+        if not isinstance(key, str) or not key or "=" in key or "\0" in key:
+            raise ValueError("runtime.env keys must be valid environment variable names")
+        if not isinstance(value, (str, bool, int, float)):
+            raise ValueError(f"runtime.env.{key} must be a scalar")
+        env[key] = str(value).lower() if isinstance(value, bool) else str(value)
     env.update(PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1", HF_HUB_OFFLINE="1",
                TRANSFORMERS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
     paths = {"TMPDIR": "tmp", "HF_HOME": "cache/hf", "XDG_CACHE_HOME": "cache",
@@ -40,6 +46,9 @@ def main():
     if action == "export":
         command = [python, str(root / "tools/export_reduced_sdar.py"), f"config={resolved}"]
     else:
+        print(f"[SFT launch] config={path} epochs={config.training.num_train_epochs} "
+              f"max_steps={config.training.get('max_steps')} "
+              f"gradient_accumulation_steps={config.training.gradient_accumulation_steps}", flush=True)
         checkpoint = Path(config.model.pretrained_model)
         if not (checkpoint / "config.json").is_file():
             raise FileNotFoundError("Reduced checkpoint missing; set source_model and run runtime.action=export first")

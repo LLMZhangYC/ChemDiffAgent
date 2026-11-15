@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from train.validation import evaluate, split_training_data
+from train.profiling import DisabledProfiler
 
 
 class SplitTests(unittest.TestCase):
@@ -156,10 +157,11 @@ class ActualSFTFunctionsTests(unittest.TestCase):
         code = compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(source), "exec")
         class Progress(list):
             def set_postfix(self, **kw): pass
-        for interval, after_epoch, enabled, expected in [(3, True, True, [2, 3, 4]),
-                                                         (1, True, True, [1, 2, 3, 4]),
-                                                         (3, False, True, [3]),
-                                                         (1, True, False, [])]:
+        for interval, after_epoch, enabled, cap, expected in [(3, True, True, None, [2, 3, 4]),
+                                                         (1, True, True, None, [1, 2, 3, 4]),
+                                                         (3, False, True, None, [3]),
+                                                         (1, True, False, None, []),
+                                                         (3, True, True, 3, [3])]:
             with self.subTest(interval=interval, epoch=after_epoch, enabled=enabled), tempfile.TemporaryDirectory() as directory:
                 model = torch.nn.Linear(1, 1)
                 model.global_steps = 0
@@ -168,21 +170,23 @@ class ActualSFTFunctionsTests(unittest.TestCase):
                     micro[0] += 1
                     if micro[0] % 2 == 0:
                         model.global_steps += 1
-                config = NS(training=NS(max_grad_norm=None), wandb={"enabled": False},
+                config = NS(get=lambda *a: {}, training=NS(max_grad_norm=None), wandb={"enabled": False},
                             model=NS(optimized_name="optimized"))
                 batch = {name: torch.ones(1) for name in ["extended_input_ids", "p_mask", "tok_idx_ext", "labels"]}
                 namespace = dict(first_epoch=0, num_train_epochs=2, model=model, config=config,
                     torch=torch, json=json, Path=Path, output_dir=directory, tokenizer=None,
                     validation_enabled=enabled, validation_config={"eval_after_epoch": after_epoch},
-                    eval_steps=interval, validation_dataloader=[],
+                    eval_steps=interval, validation_dataloader=[], max_optimizer_steps=cap,
+                    create_profiler=lambda *a, **kw: DisabledProfiler(),
                     evaluate=lambda *a: {"loss": 1, "masked_accuracy": .5},
                     forward_process=lambda **kw: torch.tensor(1.),
-                    tqdm=lambda data, **kw: Progress(data), train_dataloader_lm=[batch]*4,
+                    tqdm=lambda data, **kw: Progress(data), train_dataloader_lm=[batch]*(8 if cap else 4),
                     data_time_m=NS(update=lambda x: None), time=NS(time=lambda: 0), end=0,
                     optimizer=NS(step=lambda: None, zero_grad=lambda **kw: None),
                     lr_scheduler=NS(step=lambda: None), logger=NS(info=lambda x: None),
                     save_checkpoint=lambda *a, **kw: None,
-                    accelerator=NS(device="cpu", is_local_main_process=True, is_main_process=True,
+                    accelerator=NS(device=torch.device("cpu"), process_index=0, num_processes=1,
+                                   is_local_main_process=True, is_main_process=True,
                                    backward=backward, wait_for_everyone=lambda: None))
                 exec(code, namespace)
                 history = namespace["exercise"]()

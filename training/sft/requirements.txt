@@ -8,6 +8,7 @@ huggingface-hub
 omegaconf
 wandb
 
-# Triton-related packages are intentionally excluded. The remaining FlashAttention
-# RMSNorm import in models/sdar/modeling_sdar.py still needs a backend replacement
-# before this dependency list alone can run the current model.
+# NPU native RMSNorm, SwiGLU and masked attention require torch-npu plus matching
+# PyTorch, CANN runtime/operator packages and driver. Install the matching torch-npu
+# separately for the server stack; this file's torch pin is not an NPU version matrix.
+# NPU execution does not require flash-attn, liger-kernel or Triton.

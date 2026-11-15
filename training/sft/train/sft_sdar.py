@@ -26,6 +26,7 @@ from models import SDARForCausalLM
 from transformers import AutoTokenizer
 from train.prompting_utils import UniversalPrompting
 from train.validation import split_training_data, evaluate
+from train.profiling import create_profiler
 from models.lr_schedulers import get_scheduler
 from models.logging import set_verbosity_info, set_verbosity_error
 
@@ -643,6 +644,12 @@ def main():
     num_update_steps_per_epoch = math.ceil(len(dataset_lm) / total_batch_size_lm)
     num_train_epochs = config.training.num_train_epochs
     max_train_steps = num_update_steps_per_epoch * num_train_epochs + 1
+    # Optional cap on actual optimizer updates, not forward/backward micro-steps.
+    max_optimizer_steps = config.training.get("max_steps")
+    if max_optimizer_steps is not None:
+        if isinstance(max_optimizer_steps, bool) or not isinstance(max_optimizer_steps, int) or max_optimizer_steps < 1:
+            raise ValueError("training.max_steps must be a positive integer or null")
+        max_train_steps = min(max_train_steps, max_optimizer_steps)
 
     lr_scheduler = get_scheduler(
         config.lr_scheduler.scheduler,
@@ -769,51 +776,65 @@ def main():
         
         
 
-        for step, batch in enumerate(progress_bar, start=1):
+        # Only the first epoch may create a native profiler. Never restart it.
+        profile_settings = config.get("profiling", {}) if epoch == first_epoch else {}
+        with create_profiler(profile_settings, output_dir,
+                             accelerator.process_index, accelerator.device.type, epoch,
+                             world_size=accelerator.num_processes) as profiler:
+            for step, batch in enumerate(progress_bar, start=1):
 
-            data_time_m.update(time.time() - end)
+                data_time_m.update(time.time() - end)
 
 
-            extended_input_ids = batch["extended_input_ids"].to(accelerator.device)
-            p_mask = batch["p_mask"].to(accelerator.device)
-            tok_idx_ext = batch["tok_idx_ext"].to(accelerator.device)
-            labels = batch["labels"].to(accelerator.device)
+                extended_input_ids = batch["extended_input_ids"].to(accelerator.device)
+                p_mask = batch["p_mask"].to(accelerator.device)
+                tok_idx_ext = batch["tok_idx_ext"].to(accelerator.device)
+                labels = batch["labels"].to(accelerator.device)
 
-            loss_lm = forward_process(
-                        extended_input_ids=extended_input_ids,
-                        p_mask=p_mask,
-                        tok_idx_ext=tok_idx_ext,
-                        labels=labels
-                    )
-            if not torch.isfinite(loss_lm.detach()).all():
-                raise FloatingPointError("Non-finite SFT loss")
-            optimizer_step_before = getattr(model, "global_steps", None)
-            accelerator.backward(loss_lm)
-            if config.training.max_grad_norm is not None:
-                accelerator.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
-            # DeepSpeed's wrapped optimizer performs the configured accumulation
-            # and only updates parameters on its accumulation boundary.
-            optimizer.step()
-            # Accelerate/DeepSpeed performs the real optimizer update inside
-            # backward(). Advance the external scheduler only on that boundary.
-            if optimizer_step_before is None or model.global_steps > optimizer_step_before:
-                lr_scheduler.step()
-                completed_optimizer_steps += 1
-            optimizer.zero_grad(set_to_none=True)
+                loss_lm = forward_process(
+                            extended_input_ids=extended_input_ids,
+                            p_mask=p_mask,
+                            tok_idx_ext=tok_idx_ext,
+                            labels=labels
+                        )
+                if not torch.isfinite(loss_lm.detach()).all():
+                    raise FloatingPointError("Non-finite SFT loss")
+                optimizer_step_before = getattr(model, "global_steps", None)
+                accelerator.backward(loss_lm)
+                if config.training.max_grad_norm is not None:
+                    accelerator.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
+                # DeepSpeed's wrapped optimizer performs the configured accumulation
+                # and only updates parameters on its accumulation boundary.
+                optimizer.step()
+                # Accelerate/DeepSpeed performs the real optimizer update inside
+                # backward(). Advance the external scheduler only on that boundary.
+                optimizer_updated = optimizer_step_before is None or model.global_steps > optimizer_step_before
+                if optimizer_updated:
+                    lr_scheduler.step()
+                    completed_optimizer_steps += 1
+                optimizer.zero_grad(set_to_none=True)
 
-            global_steps += 1
-            if accelerator.is_main_process and config.wandb.get("enabled", True):
-                wandb.log({"train_loss": loss_lm.item()}, step=global_steps)
-            progress_bar.set_postfix(loss=f"{loss_lm.item():.4f}")
-            if (validation_enabled and eval_steps is not None and completed_optimizer_steps > 0
-                    and completed_optimizer_steps % eval_steps == 0
-                    and last_validation_step != completed_optimizer_steps):
-                run_validation(epoch)
+                global_steps += 1
+                if accelerator.is_main_process and config.wandb.get("enabled", True):
+                    wandb.log({"train_loss": loss_lm.item()}, step=global_steps)
+                progress_bar.set_postfix(loss=f"{loss_lm.item():.4f}")
+                if optimizer_updated:
+                    # Include all accumulated micro-batches, and advance before early stopping.
+                    profiler.step()
+                if (validation_enabled and eval_steps is not None and completed_optimizer_steps > 0
+                        and completed_optimizer_steps % eval_steps == 0
+                        and last_validation_step != completed_optimizer_steps):
+                    run_validation(epoch)
+                if max_optimizer_steps is not None and completed_optimizer_steps >= max_optimizer_steps:
+                    logger.info(f"Reached training.max_steps={max_optimizer_steps}; saving and stopping")
+                    break
         accelerator.wait_for_everyone()
         if (validation_enabled and validation_config.get("eval_after_epoch", True)
                 and (last_validation_step, last_validation_epoch) != (completed_optimizer_steps, epoch)):
             run_validation(epoch)
         save_checkpoint(model, tokenizer, config, accelerator, config.model.optimized_name, epoch=epoch)
+        if max_optimizer_steps is not None and completed_optimizer_steps >= max_optimizer_steps:
+            break
 
     
     accelerator.wait_for_everyone()
@@ -826,6 +847,7 @@ def main():
             "num_hidden_layers": len(unwrapped.model.layers),
             "expanded_length": int(extended_input_ids.shape[1]),
             "micro_steps": global_steps,
+            "max_steps": max_optimizer_steps,
             "optimizer_steps": int(getattr(model, "global_steps", global_steps)),
             "scheduler_steps": int(getattr(getattr(lr_scheduler, "scheduler", lr_scheduler), "last_epoch", -1)),
             "last_loss": float(loss_lm.detach()),
