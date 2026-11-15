@@ -32,8 +32,7 @@ def main():
                TRANSFORMERS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
     paths = {"TMPDIR": "tmp", "HF_HOME": "cache/hf", "XDG_CACHE_HOME": "cache",
              "ASCEND_CACHE_PATH": "cache/ascend", "ASCEND_PROCESS_LOG_PATH": "logs/ascend",
-             "TORCH_EXTENSIONS_DIR": "cache/torch_extensions", "TRITON_CACHE_DIR": "cache/triton",
-             "WANDB_DIR": "wandb"}
+             "TORCH_EXTENSIONS_DIR": "cache/torch_extensions", "TRITON_CACHE_DIR": "cache/triton"}
     for key, relative in paths.items():
         value = work / relative
         value.mkdir(parents=True, exist_ok=True)

@@ -41,7 +41,7 @@ Accelerate 配置，防止两份配置不一致。不要直接用普通单卡 Ac
 现有环境默认是 `/data/workspace/zyc/ChemDiffAgent/envs/sft/bin/python`。
 如更换环境，同时设置 shell 的 `CHEMDIFF_PYTHON`（启动器解释器）和配置中的
 `runtime.python`（训练解释器）。CANN 路径由 `runtime.cann_root` 控制。
-默认 wandb 为离线模式，可设置 `wandb.enabled=false` 完全关闭记录。
+SFT 指标直接写入 `experiment.output_dir/metrics.jsonl`，不再使用 W&B。
 
 ## 减层含义和权重读取
 
@@ -223,3 +223,29 @@ history in `training_report.json`. Checkpoints remain saved at epoch boundaries;
 validation does not automatically select or overwrite a best checkpoint.
 Older external configs without `validation_fraction` retain training-only behavior.
 The CPU tests run with `python training/sft/tests/test_validation.py`.
+
+
+## Local train/validation loss history
+
+SFT no longer imports or requires Weights & Biases. No account, network access,
+or binary log reader is needed. Each micro-step appends a `phase: train` record
+to `experiment.output_dir/metrics.jsonl`. Every validation appends a
+`phase: validation` record to the same file and still writes the existing
+`validation_metrics.jsonl`. Logs are closed after each record for immediate reads.
+
+Records include `run_id`, zero-based `epoch`, one-based `micro_step`,
+`optimizer_step`, and `loss`. Train records also include `learning_rate`.
+Train loss is the mean of rank-local batch losses across ranks; validation loss
+retains its existing response-normalized definition and distributed de-duplication.
+Only rank zero writes files. Repeated runs in the same output directory append
+with distinct `run_id` values; `training_report.json` records the current
+`metrics_run_id`. Filter by run_id and phase before plotting.
+
+Existing W&B run files are left untouched. This change does not convert past
+binary histories or alter VRPO logging. External YAMLs with obsolete `wandb`
+sections are accepted but those sections are ignored by SFT.
+
+```json
+{"run_id":"example","phase":"train","epoch":0,"micro_step":3,"optimizer_step":3,"loss":1.15,"learning_rate":0.00001}
+{"run_id":"example","phase":"validation","epoch":0,"micro_step":3,"optimizer_step":3,"loss":1.21,"masked_accuracy":0.4}
+```

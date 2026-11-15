@@ -39,7 +39,6 @@ def main():
         config.training.num_train_epochs = 1
         config.training.gradient_accumulation_steps = accumulation
         config.optimizer.params.learning_rate = 1.0e-3
-        config.wandb.enabled = False
         OmegaConf.save(config, output / f"smoke-{name}.yaml")
     print(output)
 

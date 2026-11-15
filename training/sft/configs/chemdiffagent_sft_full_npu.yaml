@@ -4,12 +4,6 @@
 #   export CHEMDIFF_PYTHON="$(python -c 'import sys; print(sys.executable)')"
 # Check model.pretrained_model, dataset.path and runtime.cann_root on the new machine.
 
-wandb:
-  enabled: true
-  mode: offline
-  entity: null
-  resume: false
-
 experiment:
   project: chemdiffagent-sft
   output_dir: /data/hd/outputs/chemdiffagent-sft-full-npu

@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Union
 
 from omegaconf import OmegaConf
-import wandb
 import torch
 from torch.optim import AdamW
 
@@ -34,7 +33,8 @@ from torch.utils.data import Dataset, DataLoader
 
 SYSTEM_PROMPT_LEN = 28
 
-from train.utils import get_config, flatten_omega_conf, AverageMeter
+from train.utils import get_config, AverageMeter
+from train.metrics import MetricsLogger
 
 try:
     import apex
@@ -88,7 +88,6 @@ def main():
     accelerator = Accelerator(
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
         mixed_precision=config.training.mixed_precision,
-        log_with='wandb' if config.wandb.get("enabled", True) else None,
         project_dir=config.experiment.logging_dir,
         split_batches=False,
     )
@@ -111,40 +110,13 @@ def main():
     else:
         set_verbosity_error()
 
-    if accelerator.is_main_process and config.wandb.get("enabled", True):
-        resume_wandb_run = config.wandb.resume
-        run_id = config.wandb.get("run_id", None)
-        if run_id is None:
-            resume_wandb_run = False
-
-        wandb_init_kwargs = dict(
-            project=config.experiment.project,
-            entity=config.wandb.get("entity", None),
-            name=config.experiment.get("run_name", "sft_sdar"),
-            notes=f"Pretrained model: {pretrained_model}",
-        )
-        if run_id is not None:
-            wandb_init_kwargs["id"] = run_id
-            if resume_wandb_run:
-                wandb_init_kwargs["resume"] = "allow"
-
-        wandb_config = {k: v for k, v in flatten_omega_conf(config, resolve=True)}
-        wandb_config.pop("experiment.resume_from_checkpoint", None)
-        print("Wandb init kwargs:")
-        print(wandb_init_kwargs)
-        # Let the public SDK API generate missing IDs and record the actual run.
-        wandb_run = wandb.init(
-            **wandb_init_kwargs,
-            config=wandb_config,
-            mode=config.wandb.get("mode", "online"),
-        )
-        config.wandb.run_id = wandb_run.id
-
     if accelerator.is_main_process:
         os.makedirs(output_dir, exist_ok=True)
         config_path = Path(output_dir) / "config.yaml"
         logging.info(f"Saving config to {config_path}")
         OmegaConf.save(config, config_path)
+
+    metrics_logger = MetricsLogger(output_dir, enabled=accelerator.is_main_process)
 
     # If passed along, set the training seed now.
     if config.training.seed is not None:
@@ -759,8 +731,7 @@ def main():
         if accelerator.is_main_process:
             with (Path(output_dir) / "validation_metrics.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(entry) + "\n")
-            if config.wandb.get("enabled", True):
-                wandb.log({f"validation/{key}": value for key, value in metrics.items()}, step=global_steps)
+            metrics_logger.log("validation", epoch, global_steps, completed_optimizer_steps, **metrics)
 
     for epoch in range(first_epoch, num_train_epochs):
         
@@ -815,8 +786,10 @@ def main():
                 optimizer.zero_grad(set_to_none=True)
 
                 global_steps += 1
-                if accelerator.is_main_process and config.wandb.get("enabled", True):
-                    wandb.log({"train_loss": loss_lm.item()}, step=global_steps)
+                # All ranks participate; only rank zero writes the global mean.
+                step_loss = accelerator.reduce(loss_lm.detach().float(), reduction="mean").item()
+                metrics_logger.log("train", epoch, global_steps, completed_optimizer_steps,
+                                   loss=step_loss, learning_rate=optimizer.param_groups[0]["lr"])
                 progress_bar.set_postfix(loss=f"{loss_lm.item():.4f}")
                 if optimizer_updated:
                     # Include all accumulated micro-batches, and advance before early stopping.
@@ -846,6 +819,7 @@ def main():
             "distributed_type": str(accelerator.distributed_type),
             "num_hidden_layers": len(unwrapped.model.layers),
             "expanded_length": int(extended_input_ids.shape[1]),
+            "metrics_run_id": metrics_logger.run_id,
             "micro_steps": global_steps,
             "max_steps": max_optimizer_steps,
             "optimizer_steps": int(getattr(model, "global_steps", global_steps)),
@@ -856,9 +830,6 @@ def main():
         if accelerator.device.type == "npu":
             report["peak_allocated_gib"] = torch.npu.max_memory_allocated() / 2**30
         (Path(output_dir) / "training_report.json").write_text(json.dumps(report, indent=2) + "\n")
-
-    if accelerator.is_main_process and config.wandb.get("enabled", True):
-        wandb.finish()
 
     accelerator.end_training()
 
