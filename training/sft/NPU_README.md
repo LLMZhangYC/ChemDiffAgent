@@ -141,8 +141,10 @@ Level1/PipeUtilization setup and the training-side optimizer-step scheduling in
 
 With `training.max_steps=3`, `warmup=1`, `active=2`, `skip_first=0`, the first
 optimizer update warms up and the next two are recorded. All accumulated
-micro-batches are included between optimizer boundaries. Each epoch starts a
-fresh schedule. CPU/NPU activities are recorded, and the profiler closes before
+micro-batches are included between optimizer boundaries. Only the first epoch
+creates a native profiler; it stops immediately after the finite window completes. Later epochs never restart it. If the first epoch ends
+early, only a partial window is collected and later epochs do not extend it.
+CPU/NPU activities are recorded, and the profiler closes before
 checkpoint saving, including on early exit; exceptions also exit the context.
 
 Relative `profiling.output_dir` is anchored to `experiment.output_dir`. Traces
@@ -163,3 +165,7 @@ Requires the installed `torch_npu.profiler` and matching CANN profiling support;
 no Kimi/DeepSpec training framework is imported. Target-device trace generation
 still needs verification. Profiling adds overhead and should be disabled when
 estimating end-to-end training throughput.
+
+The NPU launcher disables OpenTelemetry by default via `OTEL_SDK_DISABLED=true`
+and `OTEL_METRICS_EXPORTER=none`. These do not disable torch_npu profiling.
+Set the variables explicitly before launch to override these defaults.

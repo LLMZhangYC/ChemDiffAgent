@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from train.profiling import create_profiler
+from train.profiling import create_profiler, DisabledProfiler, WindowProfiler
 
 
 class ProfilingTests(unittest.TestCase):
@@ -57,7 +57,7 @@ class ProfilingTests(unittest.TestCase):
         main = next(n for n in ast.parse(path.read_text(encoding="utf-8")).body
                     if isinstance(n, ast.FunctionDef) and n.name == "main")
         loop = next(n for n in main.body if isinstance(n, ast.For) and n.target.id == "epoch")
-        for accumulation in (1, 2):
+        for accumulation, cap in ((1, 3), (2, 3), (1, None), (2, None)):
             events = []
             class Tensor:
                 def to(self, *a): return self
@@ -69,6 +69,12 @@ class ProfilingTests(unittest.TestCase):
                 def __enter__(self): events.append("start"); return self
                 def step(self): events.append("profile_step")
                 def __exit__(self, *exc): events.append("stop")
+            native_creations = []
+            def profiler_factory(settings, *args, **kwargs):
+                if not settings.get("enabled", False):
+                    return DisabledProfiler()
+                native_creations.append(1)
+                return WindowProfiler(Capture(), 3)
             model = NS(global_steps=0, train=lambda: None, parameters=lambda: [])
             micro_calls = [0]
             def backward(loss):
@@ -77,23 +83,25 @@ class ProfilingTests(unittest.TestCase):
                     model.global_steps += 1
             batch = {k: Tensor() for k in ["extended_input_ids", "p_mask", "tok_idx_ext", "labels"]}
             env = dict(first_epoch=0, num_train_epochs=5, model=model, global_steps=0,
-                       completed_optimizer_steps=0, max_optimizer_steps=3, output_dir=".", tokenizer=None,
+                       completed_optimizer_steps=0, max_optimizer_steps=cap, output_dir=".", tokenizer=None,
                        tqdm=lambda data, **kw: Progress(data), train_dataloader_lm=[batch]*10,
-                       create_profiler=lambda *a, **kw: Capture(), time=NS(time=lambda: 0), end=0,
+                       create_profiler=profiler_factory, time=NS(time=lambda: 0), end=0,
                        data_time_m=NS(update=lambda x: None), forward_process=lambda **kw: Tensor(),
                        torch=NS(isfinite=lambda x: NS(all=lambda: True)), logger=NS(info=lambda x: None),
                        optimizer=NS(step=lambda: None, zero_grad=lambda **kw: None),
                        lr_scheduler=NS(step=lambda: None),
                        save_checkpoint=lambda *a, **kw: events.append("save"),
-                       config=NS(get=lambda *a: {}, training=NS(max_grad_norm=1),
+                       config=NS(get=lambda *a: {"enabled": True}, training=NS(max_grad_norm=1),
                                  wandb=NS(get=lambda *a: False), model=NS(optimized_name="optimized")),
                        accelerator=NS(device=NS(type="npu"), process_index=0, num_processes=1, is_local_main_process=True,
                                       is_main_process=True, backward=backward,
                                       clip_grad_norm_=lambda *a: None, wait_for_everyone=lambda: None))
             exec(compile(ast.Module(body=[loop], type_ignores=[]), str(path), "exec"), env)
-            self.assertEqual(events, ["start", "profile_step", "profile_step", "profile_step", "stop", "save"])
-            self.assertEqual(env["completed_optimizer_steps"], 3)
-            self.assertEqual(env["global_steps"], 3 * accumulation)
+            saves = 1 if cap else 5
+            self.assertEqual(events, ["start", "profile_step", "profile_step", "profile_step", "stop"] + ["save"] * saves)
+            self.assertEqual(len(native_creations), 1)
+            self.assertEqual(env["completed_optimizer_steps"], cap or 50 // accumulation)
+            self.assertEqual(env["global_steps"], cap * accumulation if cap else 50)
 
 
 

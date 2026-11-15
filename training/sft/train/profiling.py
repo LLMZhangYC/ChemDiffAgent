@@ -15,8 +15,34 @@ class DisabledProfiler:
         pass
 
 
+class WindowProfiler:
+    """Stop the native profiler immediately after the configured finite window."""
+    def __init__(self, profiler, steps):
+        self.profiler = profiler
+        self.remaining = steps
+        self.running = False
+
+    def __enter__(self):
+        self.profiler.__enter__()
+        self.running = True
+        return self
+
+    def __exit__(self, *exc):
+        if self.running:
+            self.running = False
+            return self.profiler.__exit__(*exc)
+        return False
+
+    def step(self):
+        if self.running:
+            self.profiler.step()
+            self.remaining -= 1
+            if self.remaining == 0:
+                self.__exit__(None, None, None)
+
+
 def create_profiler(settings, output_dir, rank, device_type, epoch, world_size=1):
-    """Create a fresh per-epoch window; one profiler step is one optimizer update.
+    """Create the first epoch's finite window; one step is one optimizer update.
 
     Matches Kimi's Level1/PipeUtilization setup. Relative output paths are
     anchored to the training output directory, not the subprocess working dir.
@@ -55,7 +81,7 @@ def create_profiler(settings, output_dir, rank, device_type, epoch, world_size=1
         profiler_level=api.ProfilerLevel.Level1,
         aic_metrics=api.AiCMetrics.PipeUtilization,
     )
-    return api.profile(
+    native = api.profile(
         activities=[api.ProfilerActivity.CPU, api.ProfilerActivity.NPU],
         schedule=api.schedule(**window),
         on_trace_ready=api.tensorboard_trace_handler(str(directory)),
@@ -64,3 +90,5 @@ def create_profiler(settings, output_dir, rank, device_type, epoch, world_size=1
         profile_memory=settings.get("profile_memory", False),
         with_stack=settings.get("with_stack", False),
     )
+    steps = window["skip_first"] + window["repeat"] * (window["wait"] + window["warmup"] + window["active"])
+    return WindowProfiler(native, steps)

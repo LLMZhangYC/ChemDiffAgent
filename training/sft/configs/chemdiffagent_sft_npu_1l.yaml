@@ -70,7 +70,7 @@ lr_scheduler:
 profiling:
   enabled: true
   output_dir: ./prof
-  # Schedule units are actual optimizer updates. Reset each epoch.
+  # Only the first epoch is profiled. Counts actual optimizer updates.
   skip_first: 0
   wait: 0
   warmup: 1

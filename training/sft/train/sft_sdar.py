@@ -695,7 +695,9 @@ def main():
         
         
 
-        with create_profiler(config.get("profiling", {}), output_dir,
+        # Only the first epoch may create a native profiler. Never restart it.
+        profile_settings = config.get("profiling", {}) if epoch == first_epoch else {}
+        with create_profiler(profile_settings, output_dir,
                              accelerator.process_index, accelerator.device.type, epoch,
                              world_size=accelerator.num_processes) as profiler:
             for step, batch in enumerate(progress_bar, start=1):
