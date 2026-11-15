@@ -37,8 +37,8 @@ class PhaseProfiler:
         torch.npu.synchronize()
         settings = {**self.settings, 'skip_first': 0, 'warmup': 0, 'active': 1,
                     'output_dir': str(Path(self.settings['output_dir']) / phase / f'forward_{index}')}
-        with create_profiler(settings, self.output_dir, self.rank, self.device_type, 0,
-                             self.world_size, schedule_unit=f'{phase}_forward') as profiler:
+        with create_profiler(settings, self.output_dir, self.rank, self.device_type,
+                             world_size=self.world_size, schedule_unit=f'{phase}_forward') as profiler:
             try:
                 with torch.profiler.record_function(f'inference::{phase}'):
                     yield

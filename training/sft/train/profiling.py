@@ -41,12 +41,13 @@ class WindowProfiler:
                 self.__exit__(None, None, None)
 
 
-def create_profiler(settings, output_dir, rank, device_type, epoch, world_size=1,
+def create_profiler(settings, output_dir, rank, device_type, epoch=None, world_size=1,
                     schedule_unit="optimizer_step"):
-    """Create the first epoch's finite window; one step is one optimizer update.
+    """Create a finite profiling window with a caller-defined step unit.
 
     Matches Kimi's Level1/PipeUtilization setup. Relative output paths are
-    anchored to the training output directory, not the subprocess working dir.
+    anchored to output_dir, not the subprocess working directory. Training
+    callers supply epoch; inference omits it from both paths and metadata.
     """
     if not settings.get("enabled", False):
         return DisabledProfiler()
@@ -67,16 +68,20 @@ def create_profiler(settings, output_dir, rank, device_type, epoch, world_size=1
     directory = Path(settings.get("output_dir", "prof"))
     if not directory.is_absolute():
         directory = Path(output_dir) / directory
-    directory = directory / f"rank_{rank}" / f"epoch_{epoch}"
+    directory = directory / f"rank_{rank}"
+    if epoch is not None:
+        directory = directory / f"epoch_{epoch}"
     directory.mkdir(parents=True, exist_ok=True)
     try:
         torch_version = version("torch")
     except PackageNotFoundError:
         torch_version = None
-    metadata = {"rank": rank, "world_size": world_size, "epoch": epoch,
+    metadata = {"rank": rank, "world_size": world_size,
                 "schedule_unit": schedule_unit, "schedule": window,
                 "torch_version": torch_version,
                 "torch_npu_version": getattr(torch_npu, "__version__", None)}
+    if epoch is not None:
+        metadata["epoch"] = epoch
     (directory / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     experimental = api._ExperimentalConfig(
         profiler_level=api.ProfilerLevel.Level1,

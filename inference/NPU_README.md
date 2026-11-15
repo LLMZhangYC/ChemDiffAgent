@@ -30,7 +30,7 @@ YAML 选择 `both`，一次完整推理中分别采集 prefill 和去噪 decode�
 预热、计数和保存，不采 cache commit。每个阶段只计对应的 forward，先运行 skip_first + warmup
 次而不记录，再采 active 次。每次 active forward 独立启停 profiler、同步 NPU，
 保证其他阶段不会混入 trace；因此会产生采集开销，不适合衡量端到端吞吐。
-结果分开保存在 `prof/<dataset>/<phase>/forward_<index>/rank_0/epoch_0/`。
+结果分开保存在 `prof/<dataset>/<phase>/forward_<index>/rank_0/`。
 这些独立 trace 的 native warmup 为 0；YAML warmup 表示未记录的模型预热次数。
 `both` 模式无需重复运行数据集；也可用 prefill / denoise 单独采集。数据仍完整运行。
 prefill 次数按 assistant turn 计，短于一个 block 的 prompt 不产生 prefill。
@@ -59,7 +59,7 @@ NPU 脚本默认开启采集，`PROFILE=0` 关闭。默认跳过 0 次 forward�
 `PROFILE_ACTIVE` 调整。一个 step 是一次完整模型 forward，工具调用不计 step。
 建议 smoke run 保证至少完成 warmup + active 次 forward。
 CPU/NPU 活动采用 Level1 + PipeUtilization，默认结果位于
-`outputs/inference/prof/<dataset>/rank_0/epoch_0/`，含版本及 schedule metadata。
+`outputs/inference/prof/<dataset>/rank_0/`，含版本及 schedule metadata。
 重复运行建议设置不同的 OUTPUT_DIR。异常退出也会关闭 profiler。
 
 直接运行 Python 时使用 `--device npu:0 --profile`；可通过 `--profile-dir`

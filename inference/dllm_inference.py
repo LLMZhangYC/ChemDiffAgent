@@ -136,7 +136,7 @@ def main() -> None:
                               args.shard_index, device.type, args.num_shards, args.profile_phase))
     else:
         context = create_profiler(settings, Path(args.output).resolve().parent,
-                         args.shard_index, device.type, 0,
+                         args.shard_index, device.type,
                          world_size=args.num_shards, schedule_unit="model_forward")
     with context as profiler:
         generator.profiler = profiler
