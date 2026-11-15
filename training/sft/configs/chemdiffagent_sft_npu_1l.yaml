@@ -81,6 +81,9 @@ profiling:
   with_stack: false
 
 runtime:
+  env:
+    OTEL_SDK_DISABLED: "true"
+    OTEL_METRICS_EXPORTER: "none"
   # Use runtime.action=export to prepare weights, then runtime.action=train.
   action: train
   python: /data/workspace/zyc/ChemDiffAgent/envs/sft/bin/python

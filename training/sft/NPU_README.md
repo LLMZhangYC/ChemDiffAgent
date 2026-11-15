@@ -166,6 +166,23 @@ no Kimi/DeepSpec training framework is imported. Target-device trace generation
 still needs verification. Profiling adds overhead and should be disabled when
 estimating end-to-end training throughput.
 
-The NPU launcher disables OpenTelemetry by default via `OTEL_SDK_DISABLED=true`
-and `OTEL_METRICS_EXPORTER=none`. These do not disable torch_npu profiling.
-Set the variables explicitly before launch to override these defaults.
+The NPU recipes disable OpenTelemetry through `runtime.env.OTEL_SDK_DISABLED: "true"`
+and `runtime.env.OTEL_METRICS_EXPORTER: "none"`. The launcher forwards `runtime.env`
+to child processes, overriding inherited values. These do not disable NPU profiling.
+
+
+## Full model, exactly three optimizer updates
+
+Use `configs/chemdiffagent_sft_full_npu_3steps.yaml`. It loads the complete 8B
+checkpoint with 8 ranks, BF16, ZeRO-3, accumulation 1, max_steps 3, and epoch cap 1.
+The original data/sequence limits are preserved; model size and sequence memory
+are not reduced. The first update warms up profiling and updates 2/3 are recorded.
+A checkpoint is saved before exit. This config does not export reduced weights.
+
+```bash
+export CHEMDIFF_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+bash scripts/train_sft_npu.sh config=training/sft/configs/chemdiffagent_sft_full_npu_3steps.yaml
+```
+
+Check the startup banner for `epochs=1 max_steps=3 gradient_accumulation_steps=1`.
+Check the final log for `Reached training.max_steps=3; saving and stopping`.
