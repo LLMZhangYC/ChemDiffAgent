@@ -1,6 +1,6 @@
 experiment:
   project: chemdiffagent-sft-smoke
-  run_dir: ./runs/${experiment.run_name}
+  run_dir: null  # Auto: ./res/<timestamp>-<config name>, relative to launch cwd
   output_dir: ${experiment.run_dir}/output
   run_name: chemdiffagent-sft-smoke
   num_node: 1

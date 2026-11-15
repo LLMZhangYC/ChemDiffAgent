@@ -1,6 +1,6 @@
 experiment:
   project: chemdiffagent-sft-npu-1l
-  run_dir: ./runs/${experiment.run_name}
+  run_dir: null  # Auto: ./res/<timestamp>-<config name>, relative to launch cwd
   output_dir: ${experiment.run_dir}/output
   run_name: chemdiffagent-sft-npu-1l
   num_node: 1

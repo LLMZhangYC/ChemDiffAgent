@@ -7,6 +7,7 @@ import sys
 import time
 
 from omegaconf import OmegaConf
+from run_paths import run_directory
 
 
 def main():
@@ -15,9 +16,9 @@ def main():
     path = Path(cli.get("config", root / "configs/chemdiffagent_sft_npu_1l.yaml")).resolve()
     config = OmegaConf.merge(OmegaConf.load(path), cli)
     # Anchor the common run directory before the training subprocess changes cwd.
-    if config.experiment.get("run_dir") is not None:
-        config.experiment.run_dir = str(Path(config.experiment.run_dir).expanduser().resolve())
+    config.experiment.run_dir = str(run_directory(path, config.experiment.get("run_dir")))
     config.experiment.output_dir = str(Path(config.experiment.output_dir).expanduser().resolve())
+    print(f"[Training output] {config.experiment.run_dir}", flush=True)
     action = config.runtime.get("action", "train")
     if action not in ("train", "export"):
         raise ValueError("runtime.action must be train or export")

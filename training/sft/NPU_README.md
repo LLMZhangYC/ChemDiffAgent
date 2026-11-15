@@ -212,18 +212,19 @@ Run `python training/sft/tests/test_checkpointing.py` for retention tests.
 
 ## Experiment directories
 
-All SFT recipes now define a common parent:
+NPU SFT recipes use the same timestamped `./res/<timestamp>-<config name>/`
+convention as NPU YAML inference. Each launch creates a separate run by default:
 
 ```yaml
 experiment:
   run_name: chemdiffagent-sft-full-npu-3steps
-  run_dir: ./runs/${experiment.run_name}
+  run_dir: null  # Auto: ./res/<timestamp>-<config name>
   output_dir: ${experiment.run_dir}/output
 runtime:
   work_dir: ${experiment.run_dir}/work
 ```
 
-`run_dir` is resolved relative to the directory where the NPU launcher is invoked,
+An explicit `run_dir` overrides automatic timestamping and is resolved relative to the directory where the NPU launcher is invoked,
 before the subprocess changes cwd. `output/` contains checkpoints, training
 reports, split/validation records when enabled, and `prof/`. `work/` contains
 resolved launch YAMLs, caches, temporary files and Ascend runtime logs. Existing
@@ -235,8 +236,8 @@ bash scripts/train_sft_npu.sh config=training/sft/configs/chemdiffagent_sft_full
 bash scripts/train_sft_npu.sh experiment.run_dir=/data/hd/runs/experiment-001
 ```
 
-Reusing a run_name/run_dir reuses its checkpoint paths; choose a new run_name or
-run_dir to preserve a separate experiment. No timestamp is added automatically.
+An explicitly reused `run_dir` reuses its checkpoint paths. With the default
+`run_dir: null`, every launch gets a timestamped directory, even with the same run_name.
 For the generic `scripts/train_sft.sh`, use RUN_NAME/RUN_DIR/OUTPUT_DIR to override
 the defaults. Checkpoints are exports rather than exact optimizer-state resumes.
 
