@@ -1,7 +1,3 @@
-wandb:
-  entity: null
-  resume: false
-
 experiment:
   project: chemdiffagent-sft
   run_dir: ./runs/${experiment.run_name}
@@ -15,8 +11,16 @@ model:
   optimized_name: optimized
 
 dataset:
+  validation_fraction: 0.1
+  split_seed: 10086
+  validation_seed: 10087
   path: /data/ChemDiffAgent/dataset/training/train.json
 
+
+validation:
+  # null means evaluate only at epoch end; integers count optimizer updates.
+  eval_steps: null
+  eval_after_epoch: true
 
 training:
   gradient_checkpointing_enable: true

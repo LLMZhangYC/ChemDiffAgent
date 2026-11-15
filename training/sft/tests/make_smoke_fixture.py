@@ -31,12 +31,14 @@ def main():
         config.model.reduction.source_model = str(output / "random-3l")
         config.model.pretrained_model = str(output / "random-1l")
         config.dataset.path = str(data_path)
+        # Existing integration fixtures deliberately repeat one identical pair.
+        # Holdout splitting itself is covered by test_validation.py.
+        config.dataset.validation_fraction = 0.0
         config.experiment.output_dir = str(output / f"trained-{name}")
         config.runtime.work_dir = str(output / "runtime")
         config.training.num_train_epochs = 1
         config.training.gradient_accumulation_steps = accumulation
         config.optimizer.params.learning_rate = 1.0e-3
-        config.wandb.enabled = False
         OmegaConf.save(config, output / f"smoke-{name}.yaml")
     print(output)
 

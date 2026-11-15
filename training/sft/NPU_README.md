@@ -41,7 +41,7 @@ Accelerate 配置，防止两份配置不一致。不要直接用普通单卡 Ac
 现有环境默认是 `/data/workspace/zyc/ChemDiffAgent/envs/sft/bin/python`。
 如更换环境，同时设置 shell 的 `CHEMDIFF_PYTHON`（启动器解释器）和配置中的
 `runtime.python`（训练解释器）。CANN 路径由 `runtime.cann_root` 控制。
-默认 wandb 为离线模式，可设置 `wandb.enabled=false` 完全关闭记录。
+SFT 指标直接写入 `experiment.output_dir/metrics.jsonl`，不再使用 W&B。
 
 ## 减层含义和权重读取
 
@@ -187,6 +187,12 @@ bash scripts/train_sft_npu.sh config=training/sft/configs/chemdiffagent_sft_full
 Check the startup banner for `epochs=1 max_steps=3 gradient_accumulation_steps=1`.
 Check the final log for `Reached training.max_steps=3; saving and stopping`.
 
+`chemdiffagent_sft_full_npu_3steps.yaml` additionally
+sets `validation.eval_steps: 3`. It runs one held-out evaluation after the third
+optimizer update, then saves and exits without evaluating the same state twice.
+`chemdiffagent_sft_full_npu.yaml` retains `validation.eval_steps: null` and
+`eval_after_epoch: true`, so normal full training validates only at epoch end.
+
 
 ## Checkpoint retention
 
@@ -233,3 +239,61 @@ Reusing a run_name/run_dir reuses its checkpoint paths; choose a new run_name or
 run_dir to preserve a separate experiment. No timestamp is added automatically.
 For the generic `scripts/train_sft.sh`, use RUN_NAME/RUN_DIR/OUTPUT_DIR to override
 the defaults. Checkpoints are exports rather than exact optimizer-state resumes.
+
+
+## SFT training/validation split
+
+SFT recipes hold out 10% of the input training data for validation. The split is
+deterministic and groups identical prompts together, so alternative responses
+and trace-expanded states for the same prompt cannot cross the train/validation
+boundary. `dataset.max_samples`, when set, applies before splitting.
+
+```yaml
+dataset:
+  validation_fraction: 0.1  # Set to 0 to disable the holdout.
+  split_seed: 10086
+  validation_seed: 10087
+validation:
+  eval_steps: null         # Optional positive interval in optimizer updates.
+  eval_after_epoch: true
+```
+
+Validation runs on every rank with `eval()` and no gradients, then restores the
+previous model mode. Its masking is generated once with a separate fixed seed;
+tool responses and padding remain excluded from supervision. Metrics include
+the response-normalized loss used for training, masked-token cross entropy, and
+masked-token accuracy. Distributed aggregation removes padded duplicate examples.
+These are denoising metrics, not generated-answer benchmark accuracy.
+
+The output directory contains `data_split.json` (source indices, seeds and retained
+counts), `validation_metrics.jsonl` (one record per evaluation), and validation
+history in `training_report.json`. Checkpoints remain saved at epoch boundaries;
+validation does not automatically select or overwrite a best checkpoint.
+Older external configs without `validation_fraction` retain training-only behavior.
+The CPU tests run with `python training/sft/tests/test_validation.py`.
+
+
+## Local train/validation loss history
+
+SFT no longer imports or requires Weights & Biases. No account, network access,
+or binary log reader is needed. Each micro-step appends a `phase: train` record
+to `experiment.output_dir/metrics.jsonl`. Every validation appends a
+`phase: validation` record to the same file and still writes the existing
+`validation_metrics.jsonl`. Logs are closed after each record for immediate reads.
+
+Records include `run_id`, zero-based `epoch`, one-based `micro_step`,
+`optimizer_step`, and `loss`. Train records also include `learning_rate`.
+Train loss is the mean of rank-local batch losses across ranks; validation loss
+retains its existing response-normalized definition and distributed de-duplication.
+Only rank zero writes files. Repeated runs in the same output directory append
+with distinct `run_id` values; `training_report.json` records the current
+`metrics_run_id`. Filter by run_id and phase before plotting.
+
+Existing W&B run files are left untouched. This change does not convert past
+binary histories or alter VRPO logging. External YAMLs with obsolete `wandb`
+sections are accepted but those sections are ignored by SFT.
+
+```json
+{"run_id":"example","phase":"train","epoch":0,"micro_step":3,"optimizer_step":3,"loss":1.15,"learning_rate":0.00001}
+{"run_id":"example","phase":"validation","epoch":0,"micro_step":3,"optimizer_step":3,"loss":1.21,"masked_accuracy":0.4}
+```
