@@ -297,3 +297,26 @@ sections are accepted but those sections are ignored by SFT.
 {"run_id":"example","phase":"train","epoch":0,"micro_step":3,"optimizer_step":3,"loss":1.15,"learning_rate":0.00001}
 {"run_id":"example","phase":"validation","epoch":0,"micro_step":3,"optimizer_step":3,"loss":1.21,"masked_accuracy":0.4}
 ```
+
+
+## Microstep timing for operator comparisons
+
+By default, each train record in `experiment.output_dir/metrics.jsonl` includes
+`microstep_time_s` (seconds). The progress bar also displays `micro_s`. One
+microstep is one dataloader batch, not a full gradient accumulation cycle.
+The synchronized wall-clock window starts before fetching the batch and ends
+after forward, backward, gradient communication, clipping, optimizer/scheduler
+processing and zeroing gradients. Device synchronization waits for queued work
+on NPU/CUDA; multi-rank runs report the maximum duration across ranks. Timing
+aggregation, loss reporting, profiler stepping/export, validation and checkpoint
+saving are outside the window. This is training-batch latency, not GPU kernel
+time or total job duration.
+
+`optimizer_updated` identifies accumulation boundaries where weights were updated.
+`profiling_running` identifies steps while the native profiler context is open,
+including its wait/warmup phases. For operator comparisons, disable profiling,
+ignore startup/warmup steps and compare matching batch shapes, accumulation
+positions and precision. Per-step synchronization and timing aggregation add
+overhead; keep the same timing setting in both runs. Set
+`training.log_microstep_time: false` to disable timing and its extra synchronization
+and collective. Loss logging remains enabled.

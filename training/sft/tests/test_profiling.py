@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from train.timing import MicrostepTimer
 from train.profiling import create_profiler, DisabledProfiler, WindowProfiler
 
 
@@ -87,13 +88,13 @@ class ProfilingTests(unittest.TestCase):
                        completed_optimizer_steps=0, max_optimizer_steps=cap, output_dir=".", tokenizer=None,
                        validation_enabled=False, metrics_logger=NS(log=lambda *a, **kw: None),
                        tqdm=lambda data, **kw: Progress(data), train_dataloader_lm=[batch]*10,
-                       create_profiler=profiler_factory, time=NS(time=lambda: 0), end=0,
+                       MicrostepTimer=MicrostepTimer, create_profiler=profiler_factory, time=NS(time=lambda: 0), end=0,
                        data_time_m=NS(update=lambda x: None), forward_process=lambda **kw: Tensor(),
                        torch=NS(isfinite=lambda x: NS(all=lambda: True)), logger=NS(info=lambda x: None),
                        optimizer=NS(step=lambda: None, zero_grad=lambda **kw: None, param_groups=[{"lr": 1e-5}]),
                        lr_scheduler=NS(step=lambda: None),
                        save_checkpoint=lambda *a, **kw: events.append("save"),
-                       config=NS(get=lambda *a: {"enabled": True}, training=NS(max_grad_norm=1),
+                       config=NS(get=lambda *a: {"enabled": True}, training=NS(max_grad_norm=1, get=lambda *a: False),
                                  model=NS(optimized_name="optimized")),
                        accelerator=NS(device=NS(type="npu"), process_index=0, num_processes=1, is_local_main_process=True,
                                       is_main_process=True, backward=backward, reduce=lambda value, **kw: value,

@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from train.timing import MicrostepTimer
 from train.validation import evaluate, split_training_data
 from train.metrics import MetricsLogger
 from train.profiling import DisabledProfiler
@@ -171,10 +172,10 @@ class ActualSFTFunctionsTests(unittest.TestCase):
                     micro[0] += 1
                     if micro[0] % 2 == 0:
                         model.global_steps += 1
-                config = NS(get=lambda *a: {}, training=NS(max_grad_norm=None),
+                config = NS(get=lambda *a: {}, training=NS(max_grad_norm=None, get=lambda *a: False),
                             model=NS(optimized_name="optimized"))
                 batch = {name: torch.ones(1) for name in ["extended_input_ids", "p_mask", "tok_idx_ext", "labels"]}
-                namespace = dict(first_epoch=0, num_train_epochs=2, model=model, config=config,
+                namespace = dict(MicrostepTimer=MicrostepTimer, first_epoch=0, num_train_epochs=2, model=model, config=config,
                     torch=torch, json=json, Path=Path, output_dir=directory, tokenizer=None,
                     metrics_logger=MetricsLogger(directory), validation_enabled=enabled, validation_config={"eval_after_epoch": after_epoch},
                     eval_steps=interval, validation_dataloader=[], max_optimizer_steps=cap,

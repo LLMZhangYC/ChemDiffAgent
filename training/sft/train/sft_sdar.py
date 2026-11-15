@@ -34,8 +34,9 @@ from torch.utils.data import Dataset, DataLoader
 
 SYSTEM_PROMPT_LEN = 28
 
-from train.utils import get_config, AverageMeter
+from train.utils import get_config
 from train.metrics import MetricsLogger
+from train.timing import MicrostepTimer
 
 try:
     import apex
@@ -666,8 +667,6 @@ def main():
     logger.info(f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}")
 
     first_epoch = 0
-    data_time_m = AverageMeter()
-    end = time.time()
 
     import torch.nn.functional as F
 
@@ -753,9 +752,9 @@ def main():
         with create_profiler(profile_settings, output_dir,
                              accelerator.process_index, accelerator.device.type, epoch,
                              world_size=accelerator.num_processes) as profiler:
-            for step, batch in enumerate(progress_bar, start=1):
-
-                data_time_m.update(time.time() - end)
+            timer = MicrostepTimer(accelerator, config.training.get("log_microstep_time", True))
+            for step, batch in enumerate(timer.batches(progress_bar), start=1):
+                profiling_running = getattr(profiler, "running", False)
 
 
                 extended_input_ids = batch["extended_input_ids"].to(accelerator.device)
@@ -786,12 +785,18 @@ def main():
                     completed_optimizer_steps += 1
                 optimizer.zero_grad(set_to_none=True)
 
+                timing_metrics = timer.finish()
                 global_steps += 1
                 # All ranks participate; only rank zero writes the global mean.
                 step_loss = accelerator.reduce(loss_lm.detach().float(), reduction="mean").item()
                 metrics_logger.log("train", epoch, global_steps, completed_optimizer_steps,
-                                   loss=step_loss, learning_rate=optimizer.param_groups[0]["lr"])
-                progress_bar.set_postfix(loss=f"{loss_lm.item():.4f}")
+                                   loss=step_loss, learning_rate=optimizer.param_groups[0]["lr"],
+                                   optimizer_updated=optimizer_updated, profiling_running=profiling_running,
+                                   **timing_metrics)
+                postfix = {"loss": f"{loss_lm.item():.4f}"}
+                if timing_metrics:
+                    postfix["micro_s"] = f"{timing_metrics['microstep_time_s']:.3f}"
+                progress_bar.set_postfix(**postfix)
                 if optimizer_updated:
                     # Include all accumulated micro-batches, and advance before early stopping.
                     profiler.step()
