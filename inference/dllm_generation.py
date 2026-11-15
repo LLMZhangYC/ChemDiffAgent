@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 from transformers.cache_utils import DynamicCache
+from step_timing import StepTimer
 
 
 def _top_k_logits(logits: torch.Tensor, top_k: int) -> torch.Tensor:
@@ -92,6 +93,7 @@ class BlockDiffusionGenerator:
         self.profiler = profiler
         self.tokenizer = tokenizer
         self.device = device
+        self.step_timer = StepTimer(device)
         self.block_length = int(block_length)
         self.denoising_steps = int(denoising_steps)
         self.temperature = float(temperature)
@@ -173,6 +175,7 @@ class BlockDiffusionGenerator:
 
     @torch.inference_mode()
     def generate(self, prompt: str, max_new_tokens: int) -> str:
+        self.step_timer.reset()
         prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         requested = int(max_new_tokens)
         total_length = math.ceil(
@@ -239,6 +242,7 @@ class BlockDiffusionGenerator:
                 if not bool(mask.any().item()):
                     break
                 output = self._forward(self.model, phase="denoise",
+                    block_index=block_index, step_index=step,
                     input_ids=current,
                     attention_mask=decode_mask,
                     position_ids=block_positions,
@@ -274,6 +278,7 @@ class BlockDiffusionGenerator:
             remaining_mask = current.eq(self.mask_id)
             if bool(remaining_mask.any().item()):
                 output = self._forward(self.model, phase="denoise",
+                    block_index=block_index, step_index=self.denoising_steps, fallback=True,
                     input_ids=current,
                     attention_mask=decode_mask,
                     position_ids=block_positions,
@@ -302,6 +307,7 @@ class BlockDiffusionGenerator:
 
             # Commit the complete block to the KV cache for the next block.
             self._forward(self.model.model, phase="cache_commit",
+                block_index=block_index,
                 input_ids=current,
                 attention_mask=decode_mask,
                 position_ids=block_positions,
@@ -313,10 +319,12 @@ class BlockDiffusionGenerator:
 
         return self.tokenizer.decode(generated[:requested], skip_special_tokens=False)
 
-    def _forward(self, model, phase="denoise", **kwargs):
+    def _forward(self, model, phase="denoise", block_index=None, step_index=None,
+                 fallback=False, **kwargs):
         scoped = self.profiler is not None and hasattr(self.profiler, "forward")
         with self.profiler.forward(phase) if scoped else nullcontext():
-            output = model(**kwargs)
+            with self.step_timer.measure(phase, block_index, step_index, fallback):
+                output = model(**kwargs)
         if self.profiler is not None and not scoped:
             self.profiler.step()
         return output

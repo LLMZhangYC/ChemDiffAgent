@@ -15,7 +15,8 @@ class ForwardProfilingTests(unittest.TestCase):
         namespace = {'nullcontext': nullcontext}
         exec(compile(ast.Module(body=[forward], type_ignores=[]), '<forward>', 'exec'), namespace)
         profiler = Mock(spec=['step'])
-        owner = SimpleNamespace(profiler=profiler)
+        owner = SimpleNamespace(profiler=profiler,
+                                step_timer=SimpleNamespace(measure=lambda *args: nullcontext()))
         model = Mock(return_value='output')
         self.assertEqual(namespace['_forward'](owner, model, input_ids=123), 'output')
         model.assert_called_once_with(input_ids=123)

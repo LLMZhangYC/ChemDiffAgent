@@ -1,5 +1,13 @@
 # NPU inference
 
+每条结果的 `timing.forward_steps` 记录全部模型 forward 时延，包含 `phase`
+（prefill / denoise / cache_commit）、`turn`（从 1 开始）、`block_index` 和
+`step_index`（从 0 开始，不适用时为 null）、`fallback` 以及 `seconds`。
+去噪 step 时延只覆盖模型 forward，不含 token 采样、remasking 或工具执行。
+NPU/CUDA 前后同步设备后测量 wall time，CPU 使用 perf_counter；因此每步同步
+会影响端到端吞吐。prof 的启停/导出不计入该 forward 时延，但采集本身可能带来开销。
+`timing.total_seconds` 仍保存完整样本耗时，即使输出格式无效也会保留已有 step 记录。
+
 ## 性能采集配置
 
 ```bash
