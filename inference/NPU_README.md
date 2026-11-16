@@ -1,5 +1,24 @@
 # NPU inference
 
+## 仅补执行工具，不运行主模型
+
+```bash
+python3 inference/replay_tools.py output/single_test.jsonl \
+  --config inference/configs/inference_npu.yaml --dry-run
+python3 inference/replay_tools.py output/single_test.jsonl \
+  --config inference/configs/inference_npu.yaml
+```
+
+默认只补执行 tool_use_chain 中 success=false 的调用，按工具名称+参数去重，
+保留所有原始样本/轮次引用。`--missing-only` 只选缺依赖/文件等错误。
+缺少 tool_use_chain 时自动解析 raw_generations；`--source raw` 强制从原文的
+tool_call 标签提取，但跳过已记录成功的轮次。无法解析的调用写入 parse_errors，
+不会猜测参数。安装工具不能解决错误参数、404 或网络不可达等问题。
+工具路径读取 YAML runtime.env 或容器环境，默认 T5Chem 使用 CPU；不加载主模型，
+不需要 model.path。输出为 `res/<datetime>-tool_replay/plan.json`、
+`tool_results.jsonl`、`summary.json`；dry-run 只保存 plan。原结果和 prediction 不修改。
+重放旧参数只能恢复工具输出，不能恢复本应基于新工具结果生成的后续模型决策。
+
 ## 补跑缺失工具导致失败的样本
 
 先等待原推理结束或正常停止，使结果 JSONL 不再写入，再执行：
