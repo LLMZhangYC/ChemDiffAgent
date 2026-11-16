@@ -52,6 +52,7 @@ class RolloutState:
     prediction: str | None = None
     termination_reason: str = ""
     num_turns: int = 0
+    forward_steps: list[dict[str, Any]] = field(default_factory=list)
 
 
 THINK_RE = re.compile(r"<think>\s*(.*?)\s*</think>", flags=re.DOTALL)
@@ -273,6 +274,9 @@ def run_one(
             break
 
         raw = generator.generate(state.context, max_new_tokens=max_new_tokens)
+        timer = getattr(generator, "step_timer", None)
+        if timer is not None:
+            state.forward_steps.extend({"turn": turn_index, **record} for record in timer.records)
         state.raw_generations.append(raw)
         parsed = parse_turn(raw)
         if print_turns:
@@ -347,7 +351,8 @@ def run_one(
             "tool_sequence_match": observed_tools == expected_tools if expected_tools else None,
             "all_tool_calls_succeeded": all(step["success"] for step in state.tool_use_chain),
         },
-        "timing": {"total_seconds": round(time.perf_counter() - started_at, 6)},
+        "timing": {"total_seconds": round(time.perf_counter() - started_at, 6),
+                   "forward_steps": state.forward_steps},
         "original_data": item,
     }
     return make_json_safe(row)

@@ -1,5 +1,62 @@
 # NPU inference
 
+## 仅补执行工具，不运行主模型
+
+```bash
+python3 inference/replay_tools.py output/single_test.jsonl \
+  --config inference/configs/inference_npu.yaml --dry-run
+python3 inference/replay_tools.py output/single_test.jsonl \
+  --config inference/configs/inference_npu.yaml
+```
+
+默认只补执行 tool_use_chain 中 success=false 的调用，按工具名称+参数去重，
+保留所有原始样本/轮次引用。`--missing-only` 只选缺依赖/文件等错误。
+缺少 tool_use_chain 时自动解析 raw_generations；`--source raw` 强制从原文的
+tool_call 标签提取，但跳过已记录成功的轮次。无法解析的调用写入 parse_errors，
+不会猜测参数。安装工具不能解决错误参数、404 或网络不可达等问题。
+工具路径读取 YAML runtime.env 或容器环境，默认 T5Chem 使用 CPU；不加载主模型，
+不需要 model.path。输出为 `res/<datetime>-tool_replay/plan.json`、
+`tool_results.jsonl`、`summary.json` 和合并后的完整 `single_test.jsonl`；dry-run 只保存 plan。
+完整文件保留全部原始样本，替换重放调用的工具 output/success/seconds，旧观察保存在
+`replay_history` 中。原文件不修改。prediction、messages、raw_generations、原时延不重新计算，
+`tool_replay` 明确标注 prediction/trajectory 未重算，并保留原 evaluation。
+合并后 all_tool_calls_succeeded 根据更新的工具结果重算，不代表新的端到端生成成功率。
+失败的重放也保留，不自动修正模型给出的无效 SMILES 或其他参数。
+
+已有 replay 结果可以只合并，不再次运行工具：
+
+```bash
+python3 inference/replay_tools.py output/single_test.jsonl \
+  --merge-only res/<之前replay目录>/tool_results.jsonl
+```
+
+`--merge-only` 也可合并已完成且每行完整的部分 replay 结果。其余原样本保留。
+重放旧参数只能恢复工具输出，不能恢复本应基于新工具结果生成的后续模型决策。
+
+## 补跑缺失工具导致失败的样本
+
+先等待原推理结束或正常停止，使结果 JSONL 不再写入，再执行：
+
+```bash
+python3 inference/prepare_tool_retry.py res/<原运行目录>/single_test.jsonl
+```
+
+脚本从失败工具调用的错误信息筛选缺包、缺源码、缺权重/文件等样本，使用
+`original_data` 还原输入，并输出补跑 YAML 和启动命令。默认读取原结果旁的
+`config.yaml`，也可用 `--config <yaml>` 指定更新后的工具路径配置。
+加 `--all-tool-errors` 可选择所有工具失败样本（包括超时等）。格式解析失败且没有
+失败工具调用的样本不会被选中。补跑是从该问题开头重新生成整个 rollout，
+每个样本一次；不只是重放工具调用。默认关闭 prof，原结果不修改、不自动合并，
+新结果保存在 `res/<datetime>-inference_npu_tool_retry/`。
+
+每条结果的 `timing.forward_steps` 记录全部模型 forward 时延，包含 `phase`
+（prefill / denoise / cache_commit）、`turn`（从 1 开始）、`block_index` 和
+`step_index`（从 0 开始，不适用时为 null）、`fallback` 以及 `seconds`。
+去噪 step 时延只覆盖模型 forward，不含 token 采样、remasking 或工具执行。
+NPU/CUDA 前后同步设备后测量 wall time，CPU 使用 perf_counter；因此每步同步
+会影响端到端吞吐。prof 的启停/导出不计入该 forward 时延，但采集本身可能带来开销。
+`timing.total_seconds` 仍保存完整样本耗时，即使输出格式无效也会保留已有 step 记录。
+
 ## 性能采集配置
 
 ```bash

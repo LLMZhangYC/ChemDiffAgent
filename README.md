@@ -41,6 +41,17 @@ Optional chemistry backends can be installed with:
 bash scripts/setup_tools.sh
 ```
 
+Tool sources default to `./third_party` under the directory where you run the
+command. To choose an explicit destination (including when the script lives elsewhere):
+
+```bash
+bash /path/to/ChemDiffAgent/scripts/setup_tools.sh /data/ChemDiffAgent/third_party
+```
+
+If that destination is outside the code checkout, set `CHEMTOOL_AGENT_ROOT`,
+`UNICORE_ROOT`, `RXN_T5CHEM_ROOT`, and `CONTROLLED_CHEMICALS_CSV` in the inference
+YAML's `runtime.env` to their downloaded locations.
+
 ## 3. Dataset
 
 Training data and inference benchmarks are available at [Serendipity001/ChemDiffAgent](https://huggingface.co/datasets/Serendipity001/ChemDiffAgent).
