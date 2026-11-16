@@ -2,11 +2,16 @@
 runtime:
   # Python in the NPU environment; no conda activation required.
   # Omit python to use the container's current interpreter.
-  cann_env: /usr/local/Ascend/cann/set_env.sh
+  # cann_env: /usr/local/Ascend/cann/set_env.sh
+  cann_env: /data/workspace/zyc/CANN/cann/set_env.sh
   env:
+    CHEMTOOL_AGENT_ROOT: /data/ChemDiffAgent/third_party/ChemToolAgent
+    UNICORE_ROOT: /data/ChemDiffAgent/third_party/Uni-Core
+    RXN_T5CHEM_ROOT: /data/ChemDiffAgent/third_party/t5chem
+    CONTROLLED_CHEMICALS_CSV: /data/ChemDiffAgent/third_party/ChemistryAgent/agent/toolpool/chemcrow/data/chem_wep_smi.csv
     RXN_T5CHEM_DEVICE: cpu
 model:
-  path: /data/ChemDiffAgent/SDAR-8B-Chat
+  path: /home/f00969507/ChemDiffAgent/res/20261115_183820_201469-chemdiffagent_sft_full_npu/output/ckpt_2/optimized
 data:
   directory: /data/ChemDiffAgent/dataset/benchmark
   datasets: [single_test]

@@ -3,6 +3,10 @@
 runtime:
   cann_env: /usr/local/Ascend/cann/set_env.sh
   env:
+    CHEMTOOL_AGENT_ROOT: /data/ChemDiffAgent/third_party/ChemToolAgent
+    UNICORE_ROOT: /data/ChemDiffAgent/third_party/Uni-Core
+    RXN_T5CHEM_ROOT: /data/ChemDiffAgent/third_party/t5chem
+    CONTROLLED_CHEMICALS_CSV: /data/ChemDiffAgent/third_party/ChemistryAgent/agent/toolpool/chemcrow/data/chem_wep_smi.csv
     RXN_T5CHEM_DEVICE: cpu
 model:
   path: /data/ChemDiffAgent/SDAR-8B-Chat
