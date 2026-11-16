@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import time
+from copy import deepcopy
 
 import yaml
 
@@ -65,6 +66,50 @@ def execute_calls(calls, executor, destination):
     return counts
 
 
+def merge_results(rows, replayed):
+    """Update tool observations while preserving the original model trajectory."""
+    merged = deepcopy(rows)
+    for result in replayed:
+        for ref in result['references']:
+            index = ref['row_index']
+            if not isinstance(index, int) or not 0 <= index < len(merged):
+                raise ValueError('Replay row_index is outside the source dataset')
+            row = merged[index]
+            if row.get('sample_id') != ref.get('sample_id') or row.get('roll_idx', 0) != ref.get('roll_idx', 0):
+                raise ValueError('Replay references do not match the original results')
+            chain = row.setdefault('tool_use_chain', [])
+            matches = [call for call in chain if call.get('turn') == ref.get('turn')
+                       and call.get('tool') == result['tool'] and call.get('arguments') == result['arguments']]
+            if not matches:
+                if any(call.get('turn') == ref.get('turn') for call in chain):
+                    raise ValueError('Replay tool/arguments differ from the saved turn')
+                call = dict(turn=ref.get('turn'), tool=result['tool'], arguments=result['arguments'],
+                            input=result['arguments'].get('input', result['arguments']), recovered_from_raw=True)
+                chain.append(call)
+                chain.sort(key=lambda item: item.get('turn') or 0)
+                matches = [call]
+            for call in matches:
+                history = call.setdefault('replay_history', [])
+                history.append({key: deepcopy(call.get(key)) for key in ('output', 'success', 'seconds')})
+                call.update(output=result['output'], success=result['success'], seconds=result['seconds'],
+                            replayed=True)
+            if 'tool_replay' not in row:
+                row['tool_replay'] = dict(original_evaluation=deepcopy(row.get('evaluation', {})),
+                                          prediction_recomputed=False, trajectory_recomputed=False)
+            row.setdefault('evaluation', {})['all_tool_calls_succeeded'] = all(
+                call.get('success') is True for call in chain)
+    return merged
+
+
+def save_merged(rows, replay_path, destination):
+    replayed = [json.loads(line) for line in replay_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+    merged = merge_results(rows, replayed)
+    with destination.open('x', encoding='utf-8') as stream:
+        for row in merged:
+            stream.write(json.dumps(row, ensure_ascii=False) + '\n')
+    print(f'Full results ({len(merged)} samples): {destination}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('results', type=Path)
@@ -73,10 +118,19 @@ def main():
     parser.add_argument('--missing-only', action='store_true')
     parser.add_argument('--timeout', type=int, default=120)
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--merge-only', type=Path, help='Merge an existing tool_results.jsonl without executing tools')
     args = parser.parse_args()
     args.results = args.results.resolve()
     if args.config:
         args.config = args.config.resolve()
+    rows = [json.loads(line) for line in args.results.read_text(encoding='utf-8').splitlines() if line.strip()]
+    directory = Path.cwd() / 'res' / (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '-tool_replay')
+    if args.merge_only:
+        if args.dry_run:
+            parser.error('--merge-only cannot be combined with --dry-run')
+        directory.mkdir(parents=True, exist_ok=False)
+        save_merged(rows, args.merge_only.resolve(), directory / 'single_test.jsonl')
+        return
     config_path = args.config or args.results.parent / 'config.yaml'
     config = yaml.safe_load(config_path.read_text(encoding='utf-8')) if config_path.is_file() else {}
     if args.config and not args.config.is_file():
@@ -85,9 +139,7 @@ def main():
         os.environ[key] = str(value)
     os.environ.setdefault('RXN_T5CHEM_DEVICE', 'cpu')
     os.environ.setdefault('UNICORE_ROOT', str(ROOT / 'third_party/Uni-Core'))
-    rows = [json.loads(line) for line in args.results.read_text(encoding='utf-8').splitlines() if line.strip()]
     # Resolve config paths as the inference launcher does, before importing tools.
-    directory = Path.cwd() / 'res' / (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '-tool_replay')
     os.chdir(ROOT)
     calls, errors = collect_calls(rows, args.source, args.missing_only)
     print(f'{sum(len(c["references"]) for c in calls)} saved calls -> {len(calls)} unique executions; '
@@ -102,6 +154,7 @@ def main():
     from tool_registry import ToolExecutor, load_tools
     executor = ToolExecutor(load_tools(), timeout_seconds=args.timeout)
     counts = execute_calls(calls, executor, directory / 'tool_results.jsonl')
+    save_merged(rows, directory / 'tool_results.jsonl', directory / 'single_test.jsonl')
     (directory / 'summary.json').write_text(json.dumps(counts, indent=2), encoding='utf-8')
     print(json.dumps(counts))
 

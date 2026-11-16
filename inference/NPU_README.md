@@ -16,7 +16,21 @@ tool_call 标签提取，但跳过已记录成功的轮次。无法解析的调�
 不会猜测参数。安装工具不能解决错误参数、404 或网络不可达等问题。
 工具路径读取 YAML runtime.env 或容器环境，默认 T5Chem 使用 CPU；不加载主模型，
 不需要 model.path。输出为 `res/<datetime>-tool_replay/plan.json`、
-`tool_results.jsonl`、`summary.json`；dry-run 只保存 plan。原结果和 prediction 不修改。
+`tool_results.jsonl`、`summary.json` 和合并后的完整 `single_test.jsonl`；dry-run 只保存 plan。
+完整文件保留全部原始样本，替换重放调用的工具 output/success/seconds，旧观察保存在
+`replay_history` 中。原文件不修改。prediction、messages、raw_generations、原时延不重新计算，
+`tool_replay` 明确标注 prediction/trajectory 未重算，并保留原 evaluation。
+合并后 all_tool_calls_succeeded 根据更新的工具结果重算，不代表新的端到端生成成功率。
+失败的重放也保留，不自动修正模型给出的无效 SMILES 或其他参数。
+
+已有 replay 结果可以只合并，不再次运行工具：
+
+```bash
+python3 inference/replay_tools.py output/single_test.jsonl \
+  --merge-only res/<之前replay目录>/tool_results.jsonl
+```
+
+`--merge-only` 也可合并已完成且每行完整的部分 replay 结果。其余原样本保留。
 重放旧参数只能恢复工具输出，不能恢复本应基于新工具结果生成的后续模型决策。
 
 ## 补跑缺失工具导致失败的样本
