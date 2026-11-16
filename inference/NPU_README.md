@@ -1,5 +1,21 @@
 # NPU inference
 
+## 补跑缺失工具导致失败的样本
+
+先等待原推理结束或正常停止，使结果 JSONL 不再写入，再执行：
+
+```bash
+python3 inference/prepare_tool_retry.py res/<原运行目录>/single_test.jsonl
+```
+
+脚本从失败工具调用的错误信息筛选缺包、缺源码、缺权重/文件等样本，使用
+`original_data` 还原输入，并输出补跑 YAML 和启动命令。默认读取原结果旁的
+`config.yaml`，也可用 `--config <yaml>` 指定更新后的工具路径配置。
+加 `--all-tool-errors` 可选择所有工具失败样本（包括超时等）。格式解析失败且没有
+失败工具调用的样本不会被选中。补跑是从该问题开头重新生成整个 rollout，
+每个样本一次；不只是重放工具调用。默认关闭 prof，原结果不修改、不自动合并，
+新结果保存在 `res/<datetime>-inference_npu_tool_retry/`。
+
 每条结果的 `timing.forward_steps` 记录全部模型 forward 时延，包含 `phase`
 （prefill / denoise / cache_commit）、`turn`（从 1 开始）、`block_index` 和
 `step_index`（从 0 开始，不适用时为 null）、`fallback` 以及 `seconds`。
