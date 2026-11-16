@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-THIRD_PARTY="${ROOT}/third_party"
+# Default to the caller's directory, even when this script lives elsewhere.
+# Usage: bash /path/to/scripts/setup_tools.sh [/destination/third_party]
+if [[ $# -gt 1 ]]; then
+  echo "Usage: bash $0 [/destination/third_party]" >&2
+  exit 2
+fi
+THIRD_PARTY=${1:-"${PWD}/third_party"}
 mkdir -p "${THIRD_PARTY}"
+THIRD_PARTY=$(cd -- "${THIRD_PARTY}" && pwd)
+echo "Downloading optional tool sources to: ${THIRD_PARTY}"
 
 clone_at() {
   local url=$1
