@@ -252,3 +252,65 @@ in-place AllGather 长循环与独立输入缓冲区版本；再独立关闭 ZeR
 
 参考：[CANN 故障定位与入口日志](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/hcclug/hcclug_000024.html)、
 [DeepSpeed 0.18.6 参数获取实现](https://github.com/deepspeedai/DeepSpeed/blob/v0.18.6/deepspeed/runtime/zero/parameter_offload.py)。
+
+## Jetty SQ 问题的独立最小复现
+
+16:45 运行进一步定位到 `HcommChannelNotifyRecordOnThread` 的
+`CheckOverflow(1, false)` 未通过，返回 HCCL_E_AGAIN(20)，被 AllGather 上层转成内部错误(4)。
+这对应 Jetty SQ 的软件容量/反压检查；是否是消费位置更新异常仍需对应 PR 构建确认。
+公开相关修订：[共享 Jetty 的 CI 更新](https://api.gitcode.com/api/v5/repos/cann/hcomm/commits/0efba3f5f82e8cb80e1c1072730b6099a7af0cbb)、
+[等待可用发送空间](https://api.gitcode.com/api/v5/repos/cann/hcomm/commits/8202d04429ecd5a838c314cd3191cabf22b10b19)。
+
+使用现有 Python/torch/torch_npu/CANN 环境，在仓库根目录执行：
+
+```bash
+bash scripts/repro_hccl_allgather.sh
+```
+
+若训练使用其他 CANN 安装路径，先设置 `CHEMDIFF_CANN_ROOT` 为原来的路径；
+解释器沿用 `CHEMDIFF_PYTHON` 或当前 `python`。没有模型路径、数据集、DeepSpeed、
+Accelerate、YAML 或额外 pip 依赖。启动器只创建本次结果目录并启动四个 torchrun worker。
+
+默认条件：物理卡 4/5/6/7；BF16；每卡输入 24 MiB（12,582,912 元素），输出 96 MiB；
+输入是输出中 rank 对应的分片，因此输入地址偏移为 0/24/48/72 MiB。
+两个四卡 HCCL 通信域按批交替 AllGather，完成一批后才切换通信域，避免跨域在途操作的
+流顺序干扰。默认总计每 rank 60,000 次（每域 30,000 次）。
+两个域用于覆盖可能共享 Jetty 的 channel 使用方式，不保证每种构建都发生 Jetty 共享。
+每批 8 个独立输出缓冲区，保留所有 Work/输入/输出直到 wait 和 NPU synchronize 完成，
+随后才复用。默认 tensor 占用约 768 MiB/卡，另有 HCCL/运行时内部资源。
+
+保留原环境的 HCCL 展开模式，不强制切换算法。确认日志实际使用
+`AicpuAllGatherSoleMesh` 后才能把结果与本次训练执行路径直接比较。
+每 1000 次左右抽查当前批次每个 rank 分片的首、中、末元素，不是全 tensor 精度测试。
+子进程默认日志级别为 WARNING（2），保留 overflow 警告并避免全量 INFO 过大；
+需要更详细记录时可用 `HCCL_REPRO_LOG_LEVEL=1`，同时开启 HCCL 入口日志。
+
+输出位于启动时打印的 `res/<时间>-hccl_allgather/`，含 `console.log`、
+`output/rank_0.jsonl` 到 `rank_3.jsonl` 和 `work/logs/ascend`。
+`submit_enter` 是主机准备提交，`device_complete` 才标记整批完成；
+检测异常所在的 iteration 不一定就是首次失败的设备操作。
+
+失败后在这个结果目录执行：
+
+```bash
+grep -R -n -E 'overflow check failed|jetty SQ overflow|DoSendRecvBatchRx.*20|RunAllGather Send failed|HcclLaunchAicpuKernel run failed' work/logs/ascend
+for r in 0 1 2 3; do tail -n 3 "output/rank_${r}.jsonl"; done
+```
+
+只有同样出现 `HcommChannelNotifyRecordOnThread` 的 overflow 检查失败，才能判为
+该触发点在脱离模型与 DeepSpeed 后复现。单独的 507018/ret4、数据检查失败或超时均不足以确认。
+四个 rank 都出现 `passed` 只表示本次独立场景通过，不排除训练中的调度或资源共享触发条件。
+
+每条命令都创建新进程和新结果目录。每轮只改变一个条件：
+
+```bash
+# 对照一：只将共享输入/输出布局改成独立输入缓冲区
+bash scripts/repro_hccl_allgather.sh --layout separate
+# 对照二：只改为一个通信域
+bash scripts/repro_hccl_allgather.sh --groups 1
+# 对照三：只改为每次完成后再下发下一次
+bash scripts/repro_hccl_allgather.sh --window 1
+```
+
+前三个控制项分别对应布局、通信域共享、并发深度。不要一次同时修改它们。
+本脚本只完成本地语法和控制流程验证，真实 HCCL 复现结果需由 A5 运行确认。
