@@ -1,5 +1,6 @@
 """Profiler configuration/lifecycle tests; no NPU or training packages needed."""
 import ast
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import sys
@@ -11,6 +12,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from train.timing import MicrostepTimer
 from train.profiling import create_profiler, DisabledProfiler, WindowProfiler
+from train.diagnostics import PhaseTrace
 
 
 class ProfilingTests(unittest.TestCase):
@@ -79,9 +81,13 @@ class ProfilingTests(unittest.TestCase):
                 return WindowProfiler(Capture(), 3)
             model = NS(global_steps=0, train=lambda: None, parameters=lambda: [])
             micro_calls = [0]
-            def backward(loss):
+            @contextmanager
+            def accumulate(model):
                 micro_calls[0] += 1
-                if micro_calls[0] % accumulation == 0:
+                env["accelerator"].sync_gradients = micro_calls[0] % accumulation == 0
+                yield
+            def backward(loss):
+                if env["accelerator"].sync_gradients:
                     model.global_steps += 1
             batch = {k: Tensor() for k in ["extended_input_ids", "p_mask", "tok_idx_ext", "labels"]}
             env = dict(first_epoch=0, num_train_epochs=5, model=model, global_steps=0,
@@ -89,6 +95,7 @@ class ProfilingTests(unittest.TestCase):
                        validation_enabled=False, metrics_logger=NS(log=lambda *a, **kw: None),
                        tqdm=lambda data, **kw: Progress(data), train_dataloader_lm=[batch]*10,
                        MicrostepTimer=MicrostepTimer, create_profiler=profiler_factory, time=NS(time=lambda: 0), end=0,
+                       trace=PhaseTrace({}, ".", 0, lambda: None),
                        data_time_m=NS(update=lambda x: None), forward_process=lambda **kw: Tensor(),
                        torch=NS(isfinite=lambda x: NS(all=lambda: True)), logger=NS(info=lambda x: None),
                        optimizer=NS(step=lambda: None, zero_grad=lambda **kw: None, param_groups=[{"lr": 1e-5}]),
@@ -98,8 +105,14 @@ class ProfilingTests(unittest.TestCase):
                                  model=NS(optimized_name="optimized")),
                        accelerator=NS(device=NS(type="npu"), process_index=0, num_processes=1, is_local_main_process=True,
                                       is_main_process=True, backward=backward, reduce=lambda value, **kw: value,
+                                      accumulate=accumulate, sync_gradients=True,
                                       clip_grad_norm_=lambda *a: None, wait_for_everyone=lambda: None))
-            exec(compile(ast.Module(body=[loop], type_ignores=[]), str(path), "exec"), env)
+            # Keep the loop inside a function: diagnostic stop can return early.
+            function = ast.FunctionDef(name="run_epoch_test", args=ast.arguments(
+                posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+                body=[ast.Global(names=["global_steps", "completed_optimizer_steps"]), loop], decorator_list=[])
+            exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(path), "exec"), env)
+            env["run_epoch_test"]()
             saves = 1 if cap else 5
             self.assertEqual(events, ["start", "profile_step", "profile_step", "profile_step", "stop"] + ["save"] * saves)
             self.assertEqual(len(native_creations), 1)

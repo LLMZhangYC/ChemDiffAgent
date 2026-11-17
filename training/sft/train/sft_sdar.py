@@ -37,6 +37,7 @@ SYSTEM_PROMPT_LEN = 28
 from train.utils import get_config
 from train.metrics import MetricsLogger
 from train.timing import MicrostepTimer
+from train.diagnostics import PhaseTrace
 
 try:
     import apex
@@ -92,6 +93,9 @@ def main():
         mixed_precision=config.training.mixed_precision,
         project_dir=config.experiment.logging_dir,
         split_batches=False,
+        # This script already defines scheduler length in global optimizer updates.
+        # Avoid AcceleratedScheduler multiplying each step by the world size.
+        step_scheduler_with_optimizer=False,
     )
     if requested_device == "npu" and accelerator.device.type != "npu":
         raise RuntimeError(f"Expected NPU, got {accelerator.device}")
@@ -119,6 +123,11 @@ def main():
         OmegaConf.save(config, config_path)
 
     metrics_logger = MetricsLogger(output_dir, enabled=accelerator.is_main_process)
+    def synchronize_device():
+        if accelerator.device.type != "cpu":
+            torch.get_device_module(accelerator.device).synchronize(accelerator.device)
+    trace = PhaseTrace(config.get("diagnostics", {}), output_dir,
+                       accelerator.process_index, synchronize_device)
 
     # If passed along, set the training seed now.
     if config.training.seed is not None:
@@ -146,8 +155,9 @@ def main():
     expected_depth = config.model.get("reduction", {}).get("num_hidden_layers")
     if expected_depth is not None and model_config.num_hidden_layers != expected_depth:
         raise ValueError("Checkpoint depth does not match model.reduction.num_hidden_layers; run the export action first")
-    model, loading_info = SDARForCausalLM.from_pretrained(
-        pretrained_model, config=model_config, torch_dtype="auto", output_loading_info=True)
+    with trace.phase("model_load"):
+        model, loading_info = SDARForCausalLM.from_pretrained(
+            pretrained_model, config=model_config, torch_dtype="auto", output_loading_info=True)
     issues = {key: value for key, value in loading_info.items() if value}
     if issues or len(model.model.layers) != model.config.num_hidden_layers:
         raise RuntimeError(f"Checkpoint did not load completely: {issues}")
@@ -645,12 +655,15 @@ def main():
     #       Prepare accelerator     #
     #################################
     logger.info("Preparing model, optimizer and dataloaders")
-    if validation_enabled:
-        model, optimizer, lr_scheduler, train_dataloader_lm, validation_dataloader = accelerator.prepare(
-            model, optimizer, lr_scheduler, train_dataloader_lm, validation_dataloader)
-    else:
-        model, optimizer, lr_scheduler, train_dataloader_lm = accelerator.prepare(
-            model, optimizer, lr_scheduler, train_dataloader_lm)
+    with trace.phase("accelerator_prepare"):
+        if validation_enabled:
+            model, optimizer, lr_scheduler, train_dataloader_lm, validation_dataloader = accelerator.prepare(
+                model, optimizer, lr_scheduler, train_dataloader_lm, validation_dataloader)
+        else:
+            model, optimizer, lr_scheduler, train_dataloader_lm = accelerator.prepare(
+                model, optimizer, lr_scheduler, train_dataloader_lm)
+    if accelerator.distributed_type == DistributedType.DEEPSPEED:
+        trace.wrap_deepspeed(model)
 
     #################################
     #             Training          #
@@ -677,35 +690,38 @@ def main():
         L1    = L - L0
         device = extended_input_ids.device
 
-        attention_mask = basic_block_attention.clone()
-        attention_mask = attention_mask.repeat_interleave(B, dim=0).to(device)
-        attention_mask = process_pad(attention_mask, extended_input_ids)
+        with trace.phase("attention_mask"):
+            attention_mask = basic_block_attention.clone()
+            attention_mask = attention_mask.repeat_interleave(B, dim=0).to(device)
+            attention_mask = process_pad(attention_mask, extended_input_ids)
 
-        logits = model(input_ids = extended_input_ids, attention_mask = attention_mask, position_ids = tok_idx_ext).logits
-        logits = torch.cat([logits[:, :L0, :], logits[:, L0 + L1 :, :]], dim=1)  # (B, L0+L1, V)
+        with trace.phase("model_forward", input_shape=list(extended_input_ids.shape)):
+            logits = model(input_ids = extended_input_ids, attention_mask = attention_mask, position_ids = tok_idx_ext).logits
+        with trace.phase("loss_compute"):
+            logits = torch.cat([logits[:, :L0, :], logits[:, L0 + L1 :, :]], dim=1)  # (B, L0+L1, V)
 
-        log_probs = F.log_softmax(logits, dim=-1)
-        logp_tok  = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)     # (B, T)
-        # Normalize by all non-padding response tokens. In standard SFT this includes
-        # every token inside <tool_response>...</tool_response>.
-        response_token_count = extended_input_ids[:, L0:L].ne(pad_id).sum(dim=1).clamp_min(1)
-        if config.training.get("mask_tool_responses", True):
-            tool_begin = find_token_positions(extended_input_ids[:, :L], tokenizer.convert_tokens_to_ids('<tool_response>'), start_pos)
-            tool_end = find_token_positions(extended_input_ids[:, :L], tokenizer.convert_tokens_to_ids('</tool_response>'), start_pos)
-            excluded = torch.tensor(
-                [sum((end - begin + 1).item() for begin, end in zip(tool_begin[b], tool_end[b])) for b in range(B)],
-                device=device,
-            )
-            response_token_count = (response_token_count - excluded).clamp_min(1)
-        loss_lm = -(logp_tok * p_mask).sum(dim=1) / response_token_count
+            log_probs = F.log_softmax(logits, dim=-1)
+            logp_tok  = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)     # (B, T)
+            # Normalize by all non-padding response tokens. In standard SFT this includes
+            # every token inside <tool_response>...</tool_response>.
+            response_token_count = extended_input_ids[:, L0:L].ne(pad_id).sum(dim=1).clamp_min(1)
+            if config.training.get("mask_tool_responses", True):
+                tool_begin = find_token_positions(extended_input_ids[:, :L], tokenizer.convert_tokens_to_ids('<tool_response>'), start_pos)
+                tool_end = find_token_positions(extended_input_ids[:, :L], tokenizer.convert_tokens_to_ids('</tool_response>'), start_pos)
+                excluded = torch.tensor(
+                    [sum((end - begin + 1).item() for begin, end in zip(tool_begin[b], tool_end[b])) for b in range(B)],
+                    device=device,
+                )
+                response_token_count = (response_token_count - excluded).clamp_min(1)
+            loss_lm = -(logp_tok * p_mask).sum(dim=1) / response_token_count
 
-        if return_metrics:
-            masked_nll = -(logp_tok.float() * p_mask).sum(dim=1)
-            correct = ((logits.argmax(dim=-1) == labels) & p_mask).sum(dim=1)
-            return torch.stack((loss_lm.float(), masked_nll, p_mask.sum(dim=1).float(),
-                                correct.float()), dim=1)
+            if return_metrics:
+                masked_nll = -(logp_tok.float() * p_mask).sum(dim=1)
+                correct = ((logits.argmax(dim=-1) == labels) & p_mask).sum(dim=1)
+                return torch.stack((loss_lm.float(), masked_nll, p_mask.sum(dim=1).float(),
+                                    correct.float()), dim=1)
 
-        loss_lm = loss_lm.sum() / B
+            loss_lm = loss_lm.sum() / B
         
         return loss_lm
 
@@ -721,8 +737,9 @@ def main():
 
     def run_validation(epoch):
         nonlocal last_validation_step, last_validation_epoch
-        metrics = evaluate(model, validation_dataloader,
-                           lambda **batch: forward_process(**batch, return_metrics=True), accelerator)
+        with trace.phase("validation"):
+            metrics = evaluate(model, validation_dataloader,
+                                lambda **batch: forward_process(**batch, return_metrics=True), accelerator)
         entry = dict(epoch=epoch, micro_step=global_steps, optimizer_step=completed_optimizer_steps, **metrics)
         validation_history.append(entry)
         last_validation_step = completed_optimizer_steps
@@ -753,45 +770,60 @@ def main():
                              accelerator.process_index, accelerator.device.type, epoch,
                              world_size=accelerator.num_processes) as profiler:
             timer = MicrostepTimer(accelerator, config.training.get("log_microstep_time", True))
-            for step, batch in enumerate(timer.batches(progress_bar), start=1):
+            for step, batch in enumerate(trace.batches(timer.batches(progress_bar), epoch, global_steps + 1), start=1):
                 profiling_running = getattr(profiler, "running", False)
 
+                # Accelerate 1.15 explicitly passes sync_gradients to DeepSpeed.
+                # Enter this context for every micro-batch to advance the boundary.
+                with accelerator.accumulate(model):
+                    trace.emit("accumulation", "boundary", sync_gradients=accelerator.sync_gradients)
+                    with trace.phase("batch_to_device"):
+                        extended_input_ids = batch["extended_input_ids"].to(accelerator.device)
+                        p_mask = batch["p_mask"].to(accelerator.device)
+                        tok_idx_ext = batch["tok_idx_ext"].to(accelerator.device)
+                        labels = batch["labels"].to(accelerator.device)
 
-                extended_input_ids = batch["extended_input_ids"].to(accelerator.device)
-                p_mask = batch["p_mask"].to(accelerator.device)
-                tok_idx_ext = batch["tok_idx_ext"].to(accelerator.device)
-                labels = batch["labels"].to(accelerator.device)
-
-                loss_lm = forward_process(
+                    with trace.phase("forward_and_loss"):
+                        loss_lm = forward_process(
                             extended_input_ids=extended_input_ids,
                             p_mask=p_mask,
                             tok_idx_ext=tok_idx_ext,
                             labels=labels
                         )
-                if not torch.isfinite(loss_lm.detach()).all():
-                    raise FloatingPointError("Non-finite SFT loss")
-                optimizer_step_before = getattr(model, "global_steps", None)
-                accelerator.backward(loss_lm)
-                if config.training.max_grad_norm is not None:
-                    accelerator.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
-                # DeepSpeed's wrapped optimizer performs the configured accumulation
-                # and only updates parameters on its accumulation boundary.
-                optimizer.step()
-                # Accelerate/DeepSpeed performs the real optimizer update inside
-                # backward(). Advance the external scheduler only on that boundary.
-                optimizer_updated = optimizer_step_before is None or model.global_steps > optimizer_step_before
-                if optimizer_updated:
-                    lr_scheduler.step()
-                    completed_optimizer_steps += 1
-                optimizer.zero_grad(set_to_none=True)
+                    with trace.phase("loss_check"):
+                        if not torch.isfinite(loss_lm.detach()).all():
+                            raise FloatingPointError("Non-finite SFT loss")
+                    optimizer_step_before = getattr(model, "global_steps", None)
+                    with trace.phase("accelerator_backward"):
+                        accelerator.backward(loss_lm)
+                    if accelerator.sync_gradients and config.training.max_grad_norm is not None:
+                        with trace.phase("gradient_clip"):
+                            accelerator.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
+                    # DeepSpeed performs the update inside accelerator.backward();
+                    # its optimizer wrapper's step/zero_grad methods are no-ops.
+                    with trace.phase("optimizer_wrapper_step"):
+                        optimizer.step()
+                    optimizer_updated = (model.global_steps > optimizer_step_before
+                                         if optimizer_step_before is not None else
+                                         accelerator.sync_gradients and not accelerator.optimizer_step_was_skipped)
+                    if optimizer_updated:
+                        with trace.phase("scheduler_step"):
+                            lr_scheduler.step()
+                        completed_optimizer_steps += 1
+                    with trace.phase("optimizer_zero_grad"):
+                        optimizer.zero_grad(set_to_none=True)
 
-                timing_metrics = timer.finish()
+                with trace.phase("timing_sync_and_gather"):
+                    timing_metrics = timer.finish()
                 global_steps += 1
                 # All ranks participate; only rank zero writes the global mean.
-                step_loss = accelerator.reduce(loss_lm.detach().float(), reduction="mean").item()
+                with trace.phase("loss_reduce"):
+                    step_loss = accelerator.reduce(loss_lm.detach().float(), reduction="mean").item()
                 metrics_logger.log("train", epoch, global_steps, completed_optimizer_steps,
                                    loss=step_loss, learning_rate=optimizer.param_groups[0]["lr"],
                                    optimizer_updated=optimizer_updated, profiling_running=profiling_running,
+                                   sync_gradients=accelerator.sync_gradients,
+                                   scheduler_step=int(getattr(getattr(lr_scheduler, "scheduler", lr_scheduler), "last_epoch", -1)),
                                    **timing_metrics)
                 postfix = {"loss": f"{loss_lm.item():.4f}"}
                 if timing_metrics:
@@ -799,7 +831,10 @@ def main():
                 progress_bar.set_postfix(**postfix)
                 if optimizer_updated:
                     # Include all accumulated micro-batches, and advance before early stopping.
-                    profiler.step()
+                    with trace.phase("profiler_step"):
+                        profiler.step()
+                if trace.should_stop(global_steps):
+                    break
                 if (validation_enabled and eval_steps is not None and completed_optimizer_steps > 0
                         and completed_optimizer_steps % eval_steps == 0
                         and last_validation_step != completed_optimizer_steps):
@@ -807,11 +842,21 @@ def main():
                 if max_optimizer_steps is not None and completed_optimizer_steps >= max_optimizer_steps:
                     logger.info(f"Reached training.max_steps={max_optimizer_steps}; saving and stopping")
                     break
-        accelerator.wait_for_everyone()
+        if trace.should_stop(global_steps):
+            trace.emit("diagnostics", "stopped", completed_micro_steps=global_steps,
+                       optimizer_steps=completed_optimizer_steps, checkpoint_saved=False)
+            logger.info(f"Diagnostic stop after {global_steps} micro-steps; no validation or checkpoint save")
+            with trace.phase("diagnostic_shutdown"):
+                accelerator.wait_for_everyone()
+                accelerator.end_training()
+            return
+        with trace.phase("epoch_barrier"):
+            accelerator.wait_for_everyone()
         if (validation_enabled and validation_config.get("eval_after_epoch", True)
                 and (last_validation_step, last_validation_epoch) != (completed_optimizer_steps, epoch)):
             run_validation(epoch)
-        save_checkpoint(model, tokenizer, config, accelerator, config.model.optimized_name, epoch=epoch)
+        with trace.phase("checkpoint_save"):
+            save_checkpoint(model, tokenizer, config, accelerator, config.model.optimized_name, epoch=epoch)
         if max_optimizer_steps is not None and completed_optimizer_steps >= max_optimizer_steps:
             break
 

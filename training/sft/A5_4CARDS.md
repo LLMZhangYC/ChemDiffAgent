@@ -64,3 +64,70 @@ bash scripts/train_sft_npu.sh \
 尚未在目标 A5 上执行四卡全量训练，因此峰值显存、HCCL 通信和收敛需要实跑确认。
 先检查启动日志中的 `Num processes: 4`、`gradient_accumulation_steps=32`，
 再检查 run 下的训练报告、验证指标和 checkpoint。
+
+## Accelerate 1.15 梯度累积修复与 HCCL 定位
+
+训练循环现在在每个 micro-step 进入 `accelerator.accumulate(model)`。
+Accelerate 1.15 会把 `sync_gradients` 传给 DeepSpeed，未进入累积上下文时该值一直为
+true，会导致每个 micro-step 都更新参数。外部学习率调度器由训练循环在更新后推进一次，
+关闭 Accelerate 按进程数额外推进 scheduler 的行为。模型实现与依赖文件未改变。
+
+使用原四卡配置，在同一个训练进程中保留完整前向/反向和 ZeRO-3，先跑 128 个 micro-steps：
+
+```bash
+bash scripts/train_sft_npu.sh \
+  config=training/sft/configs/chemdiffagent_sft_full_npu_4cards.yaml \
+  runtime.visible_devices=4,5,6,7 \
+  diagnostics.enabled=true diagnostics.start_micro_step=85 \
+  diagnostics.stop_after_micro_steps=128
+```
+
+保持实际模型、数据和 CANN 路径。不要复用旧的 `experiment.run_dir`。
+此诊断停止条件不修改原学习率日程；到达 128 个 micro-steps 后退出，不执行验证或保存权重。
+未设置 `diagnostics.stop_after_micro_steps` 时仍按原训练条件正常验证、保存。
+如果设置了更早的 `training.max_steps` 或 epoch 已结束，原停止条件仍会先触发。
+停止在非累积边界会丢弃尚未更新的梯度，故这里选用 32 的倍数 128。
+
+`output/metrics.jsonl` 的预期值（未发生更新跳过时）：
+
+| micro_step | optimizer_step | scheduler_step | optimizer_updated |
+| --- | --- | --- | --- |
+| 31 | 0 | 0 | false |
+| 32 | 1 | 1 | true |
+| 64 | 2 | 2 | true |
+| 94 | 2 | 2 | false |
+| 96 | 3 | 3 | true |
+| 128 | 4 | 4 | true |
+
+epoch 末尾不足 32 个 micro-steps 的剩余批次按 Accelerate 默认策略再更新一次。
+
+每个 rank 单独写入 `output/diagnostics/rank_<rank>.jsonl`，每条记录立即关闭落盘。
+记录含 epoch、micro-step、阶段、时间、同步边界和 DeepSpeed 的实际更新计数。
+启动记录包含库版本、卡号、HCCL 展开模式和 ZeRO 的实际配置。
+阶段覆盖数据获取、搬运、mask、模型前向、loss 检查、`engine.backward`、`engine.step`、
+学习率推进、耗时 gather、loss reduce、profiling、验证和保存。
+
+首轮 `diagnostics.synchronize=false` 不新增设备同步或集合通信；`host_return` 只代表
+Python 调用返回，不代表异步设备任务完成。先比较四个 rank 最后进入的阶段和最早的异常。
+如果还不能定位，在同一命令末尾加 `diagnostics.synchronize=true`，在阶段前后做本卡同步：
+`device_complete` 才代表同步完成；`where=pre_sync` 可能是之前未完成的任务报错，
+`where=body` 表示调用期间异常，`where=post_sync` 表示阶段后的同步发现错误。
+同步会改变执行时序、降低性能，若同步后不再复现，应继续调查并发，而非宣告故障已修复。
+
+也可单独对照 `profiling.enabled=false`，或进一步使用
+`runtime.env.ASCEND_LAUNCH_BLOCKING=1` 获取更精确的算子调用栈。每轮只改变一个定位条件。
+梯度累积修复尚不等于修复 HCCL；独立 AllGather 通过也不覆盖整网中的异步参数预取与重算。
+
+在运行结果目录查看：
+
+```bash
+tail -n 5 output/metrics.jsonl
+for rank in 0 1 2 3; do
+  tail -n 12 "output/diagnostics/rank_${rank}.jsonl"
+done
+```
+
+本次本地验证包括 11 项控制流程/诊断/profiler 回归测试，以及从 Accelerate 1.15.0
+官方源码提取累积、DeepSpeed 包装器和 scheduler 方法的测试（DeepSpeed engine 使用替身）。
+修复前模拟 128 个 micro-steps 得到 128 次参数更新、512 次 scheduler 推进；修复后均为 4 次。
+这属于 Python 控制流程验证，未执行目标 A5 的真实反向或 HCCL，仍需以上四卡运行确认。

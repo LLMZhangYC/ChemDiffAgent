@@ -85,6 +85,12 @@ profiling:
   profile_memory: false
   with_stack: false
 
+diagnostics:
+  enabled: false
+  start_micro_step: 1
+  synchronize: false  # true adds local device synchronization at phase boundaries
+  stop_after_micro_steps: null  # diagnostic-only stop, without validation/checkpoint saving
+
 runtime:
   action: train
   # Use the same interpreter as scripts/train_sft_npu.sh on the target machine.
