@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-# The existing environment is reused; project files, caches and outputs live in /data/hd.
-PYTHON_BIN=${CHEMDIFF_PYTHON:-/data/workspace/zyc/ChemDiffAgent/envs/sft/bin/python}
+# Reuse the activated environment, or an explicitly selected interpreter.
+# Export the resolved path for configs using ${oc.env:CHEMDIFF_PYTHON}.
+PYTHON_BIN=${CHEMDIFF_PYTHON:-python}
 export PYTHONDONTWRITEBYTECODE=1
-exec "${PYTHON_BIN}" "${ROOT}/training/sft/tools/launch_npu.py" "$@"
+export CHEMDIFF_PYTHON
+CHEMDIFF_PYTHON=$("${PYTHON_BIN}" -c 'import sys; print(sys.executable)')
+exec "${CHEMDIFF_PYTHON}" "${ROOT}/training/sft/tools/launch_npu.py" "$@"

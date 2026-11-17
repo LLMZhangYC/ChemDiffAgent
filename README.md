@@ -67,6 +67,17 @@ hf download Serendipity001/ChemDiffAgent \
 
 Train ChemDiffAgent using Agentic SFT followed by Agentic VRPO.
 
+For **A5 four-NPU SFT**, reuse the existing compatible Python/CANN environment
+and the current NPU training entry. See [the four-card guide](training/sft/A5_4CARDS.md).
+
+```bash
+bash scripts/train_sft_npu.sh \
+  config=training/sft/configs/chemdiffagent_sft_full_npu_4cards.yaml
+```
+
+The profile uses four ranks and accumulation 32 to preserve global batch 128.
+It retains the current full-model training implementation and dependencies.
+
 Run Agentic SFT with the downloaded `training/train.json`. Set `BASE_MODEL` to the local directory or Hugging Face model ID of your starting checkpoint. The repository uses SDAR by default.
 
 ```bash

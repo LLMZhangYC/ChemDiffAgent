@@ -5,6 +5,9 @@
 复用服务器上已有的 Python 环境与 CANN，不安装或修改其依赖。
 下列命令均在 `zyc` 容器中执行。
 
+A5 四卡全量 SFT 使用新增配置 `configs/chemdiffagent_sft_full_npu_4cards.yaml`，
+具体启动方式见 [A5_4CARDS.md](A5_4CARDS.md)。该方案沿用当前代码与已有环境。
+
 ## 配置与启动
 
 主配置：`/data/hd/ChemDiffAgent/training/sft/configs/chemdiffagent_sft_npu_1l.yaml`。
@@ -38,9 +41,10 @@ bash /data/hd/ChemDiffAgent/scripts/train_sft_npu.sh runtime.action=train runtim
 Accelerate 配置，防止两份配置不一致。不要直接用普通单卡 Accelerator 启动 NPU 路径：
 原训练循环依赖 DeepSpeed 处理梯度累积、裁剪和优化器更新。
 
-现有环境默认是 `/data/workspace/zyc/ChemDiffAgent/envs/sft/bin/python`。
-如更换环境，同时设置 shell 的 `CHEMDIFF_PYTHON`（启动器解释器）和配置中的
-`runtime.python`（训练解释器）。CANN 路径由 `runtime.cann_root` 控制。
+启动脚本默认使用当前已激活环境的 `python`，也支持显式设置 `CHEMDIFF_PYTHON`。
+脚本会将解析后的解释器路径导出为 `CHEMDIFF_PYTHON`。全量配置的 `runtime.python`
+通过这个变量选择训练解释器；旧单层配置若仍写有固定路径，也需将该字段指向同一环境。
+CANN 路径由 `runtime.cann_root` 控制。
 SFT 指标直接写入 `experiment.output_dir/metrics.jsonl`，不再使用 W&B。
 
 ## 减层含义和权重读取
