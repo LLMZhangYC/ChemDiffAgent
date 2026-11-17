@@ -666,8 +666,11 @@ def main():
                 model, optimizer, lr_scheduler, train_dataloader_lm)
     if accelerator.distributed_type == DistributedType.DEEPSPEED:
         actual_overlap = verify_deepspeed_overlap(model, overlap_comm)
-        logger.info(f"DeepSpeed effective overlap_comm={actual_overlap}; "
-                    f"gradient_accumulation_steps={model.gradient_accumulation_steps()}")
+        if accelerator.is_main_process:
+            # Print after engine initialization; do not depend on INFO log filters.
+            print(f"DeepSpeed effective overlap_comm={actual_overlap}; "
+                  f"gradient_accumulation_steps={model.gradient_accumulation_steps()}; "
+                  f"gradient_checkpointing={model.module.is_gradient_checkpointing}", flush=True)
         trace.wrap_deepspeed(model)
 
     #################################

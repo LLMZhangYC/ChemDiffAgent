@@ -1,8 +1,13 @@
-# A5 四卡 SFT：使用当前仓库和现有环境
+# A5 四卡 SFT：当前 HCCL 诊断配置
 
 入口沿用 `scripts/train_sft_npu.sh` → `training/sft/tools/launch_npu.py` →
 `training/sft/train/sft_sdar.py`。四卡配置是
 `training/sft/configs/chemdiffagent_sft_full_npu_4cards.yaml`。
+
+当前该配置用于复现第 363 步前向故障的对照：卡 4/5/6/7、梯度检查点关闭、
+`deepspeed_overlap_comm: false`、32 步累积、阶段日志开启，512 个 micro-steps 后退出。
+这次停止不执行验证或保存 checkpoint；如需完整训练，设置
+`diagnostics.stop_after_micro_steps=null`。它相对最近失败运行只改变通信重叠策略。
 
 本配置从当前仓库的 `chemdiffagent_sft_full_npu.yaml` 派生，不替换模型实现、
 算子调用或依赖文件。继续使用你已经验证匹配的 Python、torch_npu 和 CANN 环境，
@@ -13,13 +18,17 @@
 | 字段 | 当前八卡全量配置 | 新增四卡配置 |
 | --- | --- | --- |
 | `runtime.num_processes` | 8 | 4 |
-| `runtime.visible_devices` | `0,1,2,3,4,5,6,7` | `0,1,2,3` |
+| `runtime.visible_devices` | `0,1,2,3,4,5,6,7` | `4,5,6,7` |
 | `training.gradient_accumulation_steps` | 16 | 32 |
 | 每卡 micro batch | 1 | 1 |
 | 全局 batch | 128 | 128 |
+| `training.gradient_checkpointing_enable` | true | false（沿用最近失败运行） |
+| `training.deepspeed_overlap_comm` | 未设置，ZeRO-3 默认 true | false |
+| `diagnostics.enabled` | 未设置，默认 false | true |
+| `diagnostics.stop_after_micro_steps` | 未设置 | 512 |
 
-除运行名称外，其余字段与当前八卡全量配置相同：完整模型、3 epochs、BF16、
-梯度检查点、学习率、验证集切分、validation、profiling，以及当前的序列长度策略。
+完整模型、3 epochs 的学习率日程、BF16、学习率、验证集切分、validation、profiling，
+以及当前的序列长度策略仍沿用八卡全量配置；诊断停止会在完整训练结束前退出。
 不减层，不额外截断序列。每个 optimizer update 包含 32 个 micro steps，
 profiling 仍按 optimizer update 计数。
 
@@ -132,41 +141,48 @@ done
 修复前模拟 128 个 micro-steps 得到 128 次参数更新、512 次 scheduler 推进；修复后均为 4 次。
 这属于 Python 控制流程验证，未执行目标 A5 的真实反向或 HCCL，仍需以上四卡运行确认。
 
-## 第 353 步前向 AllGather 故障：仅关闭通信重叠的对照
+## 第 363 步前向 AllGather 故障：仅关闭通信重叠的对照
 
 `training.deepspeed_overlap_comm` 是可选开关：省略或设为 `null` 沿用 DeepSpeed 默认值，
 `false` 关闭通信重叠，`true` 显式开启。训练入口在模型加载和 `accelerator.prepare()` 前，
 将它写入实际 DeepSpeed 配置的 `zero_optimization.overlap_comm`，并在 engine 创建后
 检查实际值；不匹配会立即报错。此开关不依赖 `diagnostics.enabled`。
 
-在现有四卡 YAML 的对应节点中添加或修改以下字段，保留其他原有字段：
+当前仓库的四卡 YAML 已配置好以下字段，拉取后无需再次手动添加：
 
 ```yaml
 training:
+  gradient_checkpointing_enable: false
+  gradient_accumulation_steps: 32
   deepspeed_overlap_comm: false
 diagnostics:
   enabled: true
   synchronize: false
+  stop_after_micro_steps: 512
 ```
 
-也可以不编辑现有 YAML，直接用原脚本进行 512 个 micro-steps 的对照：
+直接用原脚本进行 512 个 micro-steps 的对照，设备默认是 4/5/6/7：
 
 ```bash
 bash scripts/train_sft_npu.sh \
-  config=training/sft/configs/chemdiffagent_sft_full_npu_4cards.yaml \
-  runtime.visible_devices=4,5,6,7 \
-  training.deepspeed_overlap_comm=false \
-  diagnostics.enabled=true diagnostics.synchronize=false \
-  diagnostics.stop_after_micro_steps=512
+  config=training/sft/configs/chemdiffagent_sft_full_npu_4cards.yaml
 ```
 
-这轮只改变通信重叠设置；梯度累积仍为 32，预取、合并聚合、checkpoint 重算、profiling、
+最近第 363 步失败运行的实际配置是 checkpoint 关闭、overlap 开启。
+这轮相对它只关闭通信重叠；梯度累积仍为 32，预取、合并聚合、profiling、
 模型和数据路径、HCCL 环境均沿用本次基线。不要同时添加 `ASCEND_LAUNCH_BLOCKING`。
 关闭 overlap 不等于关闭预取或使全部 HCCL 调用成为同步调用。
 512 是诊断停止条件，不修改学习率日程；到达后不执行验证或保存 checkpoint。
 若需要继续完整训练，将 `diagnostics.stop_after_micro_steps` 保持为 `null`。
 
-启动时应看到 `DeepSpeed effective overlap_comm=False; gradient_accumulation_steps=32`。
+启动器先打印 `requested_overlap_comm=False`，这只表示读取了请求值。
+模型、数据和 DeepSpeed engine 初始化完成后，rank 0 直接打印（不依赖 INFO 日志级别）：
+
+```text
+DeepSpeed effective overlap_comm=False; gradient_accumulation_steps=32; gradient_checkpointing=False
+```
+
+这条实际值输出在第一个训练 batch 前出现，并非刚启动进程时立即出现。
 在新运行目录执行以下命令，核实 engine 的实际配置：
 
 ```bash
@@ -174,6 +190,6 @@ grep '"phase": "deepspeed"' output/diagnostics/rank_0.jsonl
 ```
 
 应包含 `overlap_comm=False`，预取上限仍为 `prefetch_bucket_size=50000000`（原默认值）。
-若越过第 353 步，先验证到 512 步的 16 次更新；一次通过不能证明已解决长期稳定性问题。
+若越过第 363 步，先验证到 512 步的 16 次更新；一次通过不能证明已解决长期稳定性问题。
 若再次失败，比较四卡阶段日志和同一轮的 HCCL 日志。此开关仅完成本地配置传递与回归测试，
 尚未在目标 A5 上验证故障是否消失。

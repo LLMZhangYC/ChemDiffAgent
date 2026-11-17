@@ -1,5 +1,7 @@
-# Full SDAR checkpoint, all training records, 3 epochs on four NPUs.
+# Full SDAR checkpoint on four NPUs; current HCCL diagnostic stops at 512 micro-steps.
 # Derived from chemdiffagent_sft_full_npu.yaml; effective batch: 4 x 1 x 32 = 128.
+# Keep checkpointing disabled as in the failing baseline; change only overlap_comm.
+# The diagnostic stop skips validation/checkpoint saving. Use null for a full run.
 # No checkpoint export or layer reduction is performed by this configuration.
 # Activate the target machine's training environment before launching:
 #   bash scripts/train_sft_npu.sh config=training/sft/configs/chemdiffagent_sft_full_npu_4cards.yaml
@@ -32,7 +34,8 @@ validation:
 
 training:
   device: npu
-  gradient_checkpointing_enable: true
+  gradient_checkpointing_enable: false
+  deepspeed_overlap_comm: false
   gradient_accumulation_steps: 32
   batch_size_lm: 1
   mixed_precision: bf16
@@ -86,10 +89,10 @@ profiling:
   with_stack: false
 
 diagnostics:
-  enabled: false
+  enabled: true
   start_micro_step: 1
   synchronize: false  # true adds local device synchronization at phase boundaries
-  stop_after_micro_steps: null  # diagnostic-only stop, without validation/checkpoint saving
+  stop_after_micro_steps: 512  # 16 optimizer updates; no validation/checkpoint saving
 
 runtime:
   action: train
@@ -100,5 +103,5 @@ runtime:
   cann_root: ${oc.env:CHEMDIFF_CANN_ROOT,/usr/local/Ascend/ascend-toolkit/latest}
   work_dir: ${experiment.run_dir}/work
   num_processes: 4
-  visible_devices: "0,1,2,3"
+  visible_devices: "4,5,6,7"
   main_process_port: 29537

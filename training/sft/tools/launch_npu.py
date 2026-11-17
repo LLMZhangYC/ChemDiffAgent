@@ -51,7 +51,9 @@ def main():
     else:
         print(f"[SFT launch] config={path} epochs={config.training.num_train_epochs} "
               f"max_steps={config.training.get('max_steps')} "
-              f"gradient_accumulation_steps={config.training.gradient_accumulation_steps}", flush=True)
+              f"gradient_accumulation_steps={config.training.gradient_accumulation_steps} "
+              f"requested_overlap_comm={config.training.get('deepspeed_overlap_comm')} "
+              f"gradient_checkpointing={config.training.gradient_checkpointing_enable}", flush=True)
         checkpoint = Path(config.model.pretrained_model)
         if not (checkpoint / "config.json").is_file():
             raise FileNotFoundError("Reduced checkpoint missing; set source_model and run runtime.action=export first")
