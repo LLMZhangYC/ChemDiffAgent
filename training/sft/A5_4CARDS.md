@@ -4,11 +4,12 @@
 `training/sft/train/sft_sdar.py`。四卡配置是
 `training/sft/configs/chemdiffagent_sft_full_npu_4cards.yaml`。
 
-当前该配置用于复现第 363 步前向故障的对照：卡 4/5/6/7、梯度检查点关闭、
-`deepspeed_overlap_comm: false`、32 步累积、阶段和通信入口日志开启，512 个 micro-steps 后退出。
+当前该配置用于第 363 步前向故障的关闭预取对照：卡 4/5/6/7、梯度检查点关闭、
+`deepspeed_overlap_comm: false`、`deepspeed_prefetch_bucket_size: 0`、32 步累积、
+阶段和通信入口日志开启，512 个 micro-steps 后退出。
 这次停止不执行验证或保存 checkpoint；如需完整训练，设置
-`diagnostics.stop_after_micro_steps=null`。本轮在已失败的 overlap=false 基线上补充观测，
-不再修改通信执行策略。
+`diagnostics.stop_after_micro_steps=null`。本轮在已失败的 overlap=false 基线上只关闭
+ZeRO-3 后续模块参数的预取，保留当前模块必需的 AllGather。
 
 本配置从当前仓库的 `chemdiffagent_sft_full_npu.yaml` 派生，不替换模型实现、
 算子调用或依赖文件。继续使用你已经验证匹配的 Python、torch_npu 和 CANN 环境，
@@ -25,6 +26,7 @@
 | 全局 batch | 128 | 128 |
 | `training.gradient_checkpointing_enable` | true | false（沿用最近失败运行） |
 | `training.deepspeed_overlap_comm` | 未设置，ZeRO-3 默认 true | false |
+| `training.deepspeed_prefetch_bucket_size` | 未设置，ZeRO-3 默认 50000000 个元素 | 0（关闭参数预取） |
 | `diagnostics.enabled` | 未设置，默认 false | true |
 | `diagnostics.stop_after_micro_steps` | 未设置 | 512 |
 | `diagnostics.trace_collectives` | 未设置，默认 false | true，从第 320 步记录 |
@@ -144,12 +146,19 @@ done
 修复前模拟 128 个 micro-steps 得到 128 次参数更新、512 次 scheduler 推进；修复后均为 4 次。
 这属于 Python 控制流程验证，未执行目标 A5 的真实反向或 HCCL，仍需以上四卡运行确认。
 
-## 第 363 步前向 AllGather 故障：仅关闭通信重叠的对照
+## 第 363 步前向 AllGather 故障：关闭参数预取的对照
 
 `training.deepspeed_overlap_comm` 是可选开关：省略或设为 `null` 沿用 DeepSpeed 默认值，
 `false` 关闭通信重叠，`true` 显式开启。训练入口在模型加载和 `accelerator.prepare()` 前，
 将它写入实际 DeepSpeed 配置的 `zero_optimization.overlap_comm`，并在 engine 创建后
 检查实际值；不匹配会立即报错。此开关不依赖 `diagnostics.enabled`。
+
+`training.deepspeed_prefetch_bucket_size` 是新增的独立控制项，单位为参数元素数。
+训练入口在 `accelerator.prepare()` 前将其写入
+`zero_optimization.stage3_prefetch_bucket_size`，创建 engine 后读取
+`engine._config.zero_config.prefetch_bucket_size` 校验实际值；若请求 0 而实际不是 0，
+直接报错停止，不会悄悄用默认值训练。省略或 `null` 保留已有 DeepSpeed 配置，
+0 关闭预取，正整数设定预取容量。只改 YAML 而未拉取新版训练代码不会生效。
 
 当前仓库的四卡 YAML 已配置好以下字段，拉取后无需再次手动添加：
 
@@ -158,6 +167,7 @@ training:
   gradient_checkpointing_enable: false
   gradient_accumulation_steps: 32
   deepspeed_overlap_comm: false
+  deepspeed_prefetch_bucket_size: 0
 diagnostics:
   enabled: true
   synchronize: false
@@ -173,18 +183,24 @@ bash scripts/train_sft_npu.sh \
 
 15:07 的第 363 步失败运行是 checkpoint 关闭、overlap 开启。
 随后 15:42 启动的对照已确认 overlap 关闭，但四卡仍在第 363 步前向失败。
-因此关闭 overlap 不足以解决故障；当前先补通信入口记录，不继续同时修改多个执行条件。
-梯度累积仍为 32，预取、合并聚合、profiling、模型和数据路径保留。
+因此关闭 overlap 不足以解决故障。纯 AllGather 两轮通过，用户随后反馈混合通信测试
+也未报错；当前回到整网，只将预取容量从默认 50000000 改为 0。
+梯度累积仍为 32，合并聚合、profiling、模型和数据路径保留。
 不要同时添加 `ASCEND_LAUNCH_BLOCKING`。
 关闭 overlap 不等于关闭预取或使全部 HCCL 调用成为同步调用。
+不要把 `allgather_bucket_size` 或 `reduce_bucket_size` 设为 0：它们不是参数预取开关。
+也不修改 `stage3_max_live_parameters`、`stage3_max_reuse_distance` 或 persistence 阈值。
+在 DeepSpeed 0.18.6 中，后续模块的预取分支由 `prefetch_bucket_sz > 0` 控制；
+设为 0 后仍有当前模块按需获取参数的 AllGather，不能以“还看到 AllGather”判定未生效。
+[对应版本源码](https://github.com/deepspeedai/DeepSpeed/blob/v0.18.6/deepspeed/runtime/zero/partitioned_param_coordinator.py)
 512 是诊断停止条件，不修改学习率日程；到达后不执行验证或保存 checkpoint。
 若需要继续完整训练，将 `diagnostics.stop_after_micro_steps` 保持为 `null`。
 
-启动器先打印 `requested_overlap_comm=False`，这只表示读取了请求值。
+启动器先打印 `requested_overlap_comm=False`、`requested_prefetch_bucket_size=0`，这只表示读取了请求值。
 模型、数据和 DeepSpeed engine 初始化完成后，rank 0 直接打印（不依赖 INFO 日志级别）：
 
 ```text
-DeepSpeed effective overlap_comm=False; gradient_accumulation_steps=32; gradient_checkpointing=False
+DeepSpeed effective overlap_comm=False; prefetch_bucket_size=0; gradient_accumulation_steps=32; gradient_checkpointing=False
 ```
 
 这条实际值输出在第一个训练 batch 前出现，并非刚启动进程时立即出现。
@@ -194,9 +210,21 @@ DeepSpeed effective overlap_comm=False; gradient_accumulation_steps=32; gradient
 grep '"phase": "deepspeed"' output/diagnostics/rank_0.jsonl
 ```
 
-应包含 `overlap_comm=False`，预取上限仍为 `prefetch_bucket_size=50000000`（原默认值）。
+应包含 `overlap_comm=False`、`prefetch_bucket_size=0`、`gradient_accumulation_steps=32`。
 若越过第 363 步，先验证到 512 步的 16 次更新；一次通过不能证明已解决长期稳定性问题。
 若再次失败，比较四卡阶段日志和同一轮的 HCCL 日志。
+
+若关闭预取后通过，可在相同代码和数据下仅恢复原值做对照：
+
+```bash
+bash scripts/train_sft_npu.sh \
+  config=training/sft/configs/chemdiffagent_sft_full_npu_4cards.yaml \
+  training.deepspeed_prefetch_bucket_size=50000000
+```
+
+关闭预取也会改变通信批次、内存分配和时序。通过只能说明触发条件与这些变化有关，
+不能单凭一次结果认定 DeepSpeed 或 HCCL 的某个具体缺陷。预取开关和 32 步累积的
+本地控制流程测试通过，实际 A5 效果需要本轮训练验证。
 
 ## 继续定位：对齐四卡通信入口
 

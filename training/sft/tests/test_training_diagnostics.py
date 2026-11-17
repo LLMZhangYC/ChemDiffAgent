@@ -11,7 +11,8 @@ from types import SimpleNamespace as NS
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from train.diagnostics import PhaseTrace, configure_deepspeed_overlap, verify_deepspeed_overlap
+from train.diagnostics import (PhaseTrace, configure_deepspeed_overlap, verify_deepspeed_overlap,
+                               configure_deepspeed_prefetch, verify_deepspeed_prefetch)
 from train.profiling import DisabledProfiler
 
 
@@ -50,6 +51,47 @@ class DeepSpeedOverlapTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "requested True, actual False"):
             verify_deepspeed_overlap(engine, True)
         self.assertIs(verify_deepspeed_overlap(engine, None), False)
+
+
+class DeepSpeedPrefetchTests(unittest.TestCase):
+    def test_zero_is_forwarded_without_changing_other_buckets_or_accumulation(self):
+        original = {"gradient_accumulation_steps": 32, "bf16": {"enabled": True},
+                    "zero_optimization": {"stage": 3, "overlap_comm": False,
+                                          "stage3_prefetch_bucket_size": 50000000,
+                                          "allgather_bucket_size": 500000000,
+                                          "reduce_bucket_size": 500000000}}
+        config = deepcopy(original)
+        plugin = NS(deepspeed_config=config, hf_ds_config=NS(config=config))
+        accelerator = NS(state=NS(deepspeed_plugin=plugin))
+        configure_deepspeed_prefetch(accelerator, 0)
+        expected = deepcopy(original)
+        expected["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
+        self.assertEqual(config, expected)
+        self.assertIs(plugin.hf_ds_config.config, config)
+        configure_deepspeed_prefetch(accelerator, 50000000)
+        self.assertEqual(config, original)
+
+    def test_missing_key_is_added_none_preserves_default_and_bad_values_fail(self):
+        config = {"zero_optimization": {"stage": 3}}
+        accelerator = NS(state=NS(deepspeed_plugin=NS(deepspeed_config=config)))
+        configure_deepspeed_prefetch(accelerator, None)
+        self.assertEqual(config, {"zero_optimization": {"stage": 3}})
+        for bad in (-1, True, False, "0", 0.0, [], {}):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                configure_deepspeed_prefetch(accelerator, bad)
+        configure_deepspeed_prefetch(accelerator, 0)
+        self.assertEqual(config["zero_optimization"]["stage3_prefetch_bucket_size"], 0)
+        configure_deepspeed_prefetch(NS(), None)
+        with self.assertRaisesRegex(ValueError, "requires DeepSpeed"):
+            configure_deepspeed_prefetch(NS(state=NS(deepspeed_plugin=None)), 0)
+
+    def test_effective_engine_value_cannot_silently_ignore_zero(self):
+        engine = NS(_config=NS(zero_config=NS(prefetch_bucket_size=50000000)))
+        with self.assertRaisesRegex(RuntimeError, "requested 0, actual 50000000"):
+            verify_deepspeed_prefetch(engine, 0)
+        self.assertEqual(verify_deepspeed_prefetch(engine, None), 50000000)
+        engine._config.zero_config.prefetch_bucket_size = 0
+        self.assertEqual(verify_deepspeed_prefetch(engine, 0), 0)
 
 
 class TraceTests(unittest.TestCase):

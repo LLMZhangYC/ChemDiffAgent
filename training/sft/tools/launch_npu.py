@@ -53,6 +53,7 @@ def main():
               f"max_steps={config.training.get('max_steps')} "
               f"gradient_accumulation_steps={config.training.gradient_accumulation_steps} "
               f"requested_overlap_comm={config.training.get('deepspeed_overlap_comm')} "
+              f"requested_prefetch_bucket_size={config.training.get('deepspeed_prefetch_bucket_size')} "
               f"gradient_checkpointing={config.training.gradient_checkpointing_enable}", flush=True)
         checkpoint = Path(config.model.pretrained_model)
         if not (checkpoint / "config.json").is_file():

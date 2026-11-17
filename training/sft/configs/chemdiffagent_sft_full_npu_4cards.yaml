@@ -1,6 +1,6 @@
 # Full SDAR checkpoint on four NPUs; current HCCL diagnostic stops at 512 micro-steps.
 # Derived from chemdiffagent_sft_full_npu.yaml; effective batch: 4 x 1 x 32 = 128.
-# Keep checkpointing disabled as in the failing baseline; change only overlap_comm.
+# Disable prefetch relative to the failing overlap_comm=False/checkpointing=False baseline.
 # The diagnostic stop skips validation/checkpoint saving. Use null for a full run.
 # No checkpoint export or layer reduction is performed by this configuration.
 # Activate the target machine's training environment before launching:
@@ -36,6 +36,7 @@ training:
   device: npu
   gradient_checkpointing_enable: false
   deepspeed_overlap_comm: false
+  deepspeed_prefetch_bucket_size: 0  # ZeRO-3 parameter elements; null preserves the backend setting
   gradient_accumulation_steps: 32
   batch_size_lm: 1
   mixed_precision: bf16

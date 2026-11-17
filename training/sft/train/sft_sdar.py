@@ -37,7 +37,8 @@ SYSTEM_PROMPT_LEN = 28
 from train.utils import get_config
 from train.metrics import MetricsLogger
 from train.timing import MicrostepTimer
-from train.diagnostics import PhaseTrace, configure_deepspeed_overlap, verify_deepspeed_overlap
+from train.diagnostics import (PhaseTrace, configure_deepspeed_overlap, verify_deepspeed_overlap,
+                               configure_deepspeed_prefetch, verify_deepspeed_prefetch)
 from train.collective_trace import install_collective_trace
 
 try:
@@ -104,6 +105,8 @@ def main():
         raise RuntimeError("Use tools/launch_npu.py: this SFT loop relies on DeepSpeed gradient accumulation")
     overlap_comm = config.training.get("deepspeed_overlap_comm")
     configure_deepspeed_overlap(accelerator, overlap_comm)
+    prefetch_bucket_size = config.training.get("deepspeed_prefetch_bucket_size")
+    configure_deepspeed_prefetch(accelerator, prefetch_bucket_size)
 
     #####################################
     # SETUP LOGGING, SEED and CONFIG    #
@@ -667,9 +670,11 @@ def main():
                 model, optimizer, lr_scheduler, train_dataloader_lm)
     if accelerator.distributed_type == DistributedType.DEEPSPEED:
         actual_overlap = verify_deepspeed_overlap(model, overlap_comm)
+        actual_prefetch = verify_deepspeed_prefetch(model, prefetch_bucket_size)
         if accelerator.is_main_process:
             # Print after engine initialization; do not depend on INFO log filters.
             print(f"DeepSpeed effective overlap_comm={actual_overlap}; "
+                  f"prefetch_bucket_size={actual_prefetch}; "
                   f"gradient_accumulation_steps={model.gradient_accumulation_steps()}; "
                   f"gradient_checkpointing={model.module.is_gradient_checkpointing}", flush=True)
         trace.wrap_deepspeed(model)

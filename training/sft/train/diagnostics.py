@@ -1,4 +1,4 @@
-"""Opt-in phase tracing and a single-variable DeepSpeed communication control."""
+"""Opt-in phase tracing and explicit DeepSpeed communication controls."""
 from contextlib import contextmanager
 from functools import wraps
 from importlib.metadata import PackageNotFoundError, version
@@ -29,6 +29,29 @@ def verify_deepspeed_overlap(engine, requested):
     if requested is not None and actual != requested:
         raise RuntimeError(
             f"DeepSpeed overlap_comm mismatch: requested {requested}, actual {actual}")
+    return actual
+
+
+def configure_deepspeed_prefetch(accelerator, bucket_size):
+    """Set the ZeRO-3 prefetch limit (in elements) before engine initialization."""
+    if bucket_size is None:
+        return
+    if isinstance(bucket_size, bool) or not isinstance(bucket_size, int) or bucket_size < 0:
+        raise ValueError("training.deepspeed_prefetch_bucket_size must be a nonnegative integer or null")
+    plugin = getattr(accelerator.state, "deepspeed_plugin", None)
+    if plugin is None:
+        raise ValueError("training.deepspeed_prefetch_bucket_size requires DeepSpeed")
+    # Zero is intentional: skip speculative parameter prefetch, retain on-demand
+    # fetches. Do not change reduce/allgather buckets or accumulation settings.
+    plugin.deepspeed_config.setdefault("zero_optimization", {})["stage3_prefetch_bucket_size"] = bucket_size
+
+
+def verify_deepspeed_prefetch(engine, requested):
+    """Check the parsed engine field; its JSON alias has the stage3_ prefix."""
+    actual = engine._config.zero_config.prefetch_bucket_size
+    if requested is not None and actual != requested:
+        raise RuntimeError(
+            f"DeepSpeed prefetch_bucket_size mismatch: requested {requested}, actual {actual}")
     return actual
 
 
