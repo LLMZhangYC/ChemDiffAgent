@@ -131,3 +131,49 @@ done
 官方源码提取累积、DeepSpeed 包装器和 scheduler 方法的测试（DeepSpeed engine 使用替身）。
 修复前模拟 128 个 micro-steps 得到 128 次参数更新、512 次 scheduler 推进；修复后均为 4 次。
 这属于 Python 控制流程验证，未执行目标 A5 的真实反向或 HCCL，仍需以上四卡运行确认。
+
+## 第 353 步前向 AllGather 故障：仅关闭通信重叠的对照
+
+`training.deepspeed_overlap_comm` 是可选开关：省略或设为 `null` 沿用 DeepSpeed 默认值，
+`false` 关闭通信重叠，`true` 显式开启。训练入口在模型加载和 `accelerator.prepare()` 前，
+将它写入实际 DeepSpeed 配置的 `zero_optimization.overlap_comm`，并在 engine 创建后
+检查实际值；不匹配会立即报错。此开关不依赖 `diagnostics.enabled`。
+
+在现有四卡 YAML 的对应节点中添加或修改以下字段，保留其他原有字段：
+
+```yaml
+training:
+  deepspeed_overlap_comm: false
+diagnostics:
+  enabled: true
+  synchronize: false
+```
+
+也可以不编辑现有 YAML，直接用原脚本进行 512 个 micro-steps 的对照：
+
+```bash
+bash scripts/train_sft_npu.sh \
+  config=training/sft/configs/chemdiffagent_sft_full_npu_4cards.yaml \
+  runtime.visible_devices=4,5,6,7 \
+  training.deepspeed_overlap_comm=false \
+  diagnostics.enabled=true diagnostics.synchronize=false \
+  diagnostics.stop_after_micro_steps=512
+```
+
+这轮只改变通信重叠设置；梯度累积仍为 32，预取、合并聚合、checkpoint 重算、profiling、
+模型和数据路径、HCCL 环境均沿用本次基线。不要同时添加 `ASCEND_LAUNCH_BLOCKING`。
+关闭 overlap 不等于关闭预取或使全部 HCCL 调用成为同步调用。
+512 是诊断停止条件，不修改学习率日程；到达后不执行验证或保存 checkpoint。
+若需要继续完整训练，将 `diagnostics.stop_after_micro_steps` 保持为 `null`。
+
+启动时应看到 `DeepSpeed effective overlap_comm=False; gradient_accumulation_steps=32`。
+在新运行目录执行以下命令，核实 engine 的实际配置：
+
+```bash
+grep '"phase": "deepspeed"' output/diagnostics/rank_0.jsonl
+```
+
+应包含 `overlap_comm=False`，预取上限仍为 `prefetch_bucket_size=50000000`（原默认值）。
+若越过第 353 步，先验证到 512 步的 16 次更新；一次通过不能证明已解决长期稳定性问题。
+若再次失败，比较四卡阶段日志和同一轮的 HCCL 日志。此开关仅完成本地配置传递与回归测试，
+尚未在目标 A5 上验证故障是否消失。

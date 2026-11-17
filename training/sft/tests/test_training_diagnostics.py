@@ -1,5 +1,6 @@
 """CPU-only control-flow regression tests. These do not validate NPU/HCCL."""
 import ast
+from copy import deepcopy
 from contextlib import contextmanager, redirect_stdout
 import io
 import json
@@ -10,8 +11,45 @@ from types import SimpleNamespace as NS
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from train.diagnostics import PhaseTrace
+from train.diagnostics import PhaseTrace, configure_deepspeed_overlap, verify_deepspeed_overlap
 from train.profiling import DisabledProfiler
+
+
+class DeepSpeedOverlapTests(unittest.TestCase):
+    def test_explicit_false_changes_only_overlap_and_preserves_shared_config(self):
+        original = {"gradient_accumulation_steps": 32, "bf16": {"enabled": True},
+                    "zero_optimization": {"stage": 3, "overlap_comm": True,
+                                          "stage3_prefetch_bucket_size": 50000000,
+                                          "stage3_allgather_sequential": False}}
+        config = deepcopy(original)
+        plugin = NS(deepspeed_config=config, hf_ds_config=NS(config=config))
+        accelerator = NS(state=NS(deepspeed_plugin=plugin))
+        configure_deepspeed_overlap(accelerator, False)
+        expected = deepcopy(original)
+        expected["zero_optimization"]["overlap_comm"] = False
+        self.assertEqual(config, expected)
+        self.assertIs(plugin.hf_ds_config.config, config)
+        configure_deepspeed_overlap(accelerator, True)
+        self.assertEqual(config, original)
+
+    def test_unset_keeps_backend_default_and_invalid_values_fail(self):
+        config = {"zero_optimization": {"stage": 3}}
+        accelerator = NS(state=NS(deepspeed_plugin=NS(deepspeed_config=config)))
+        configure_deepspeed_overlap(accelerator, None)
+        self.assertEqual(config, {"zero_optimization": {"stage": 3}})
+        for bad in ("false", "true", 0, 1, [], {}):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                configure_deepspeed_overlap(accelerator, bad)
+        configure_deepspeed_overlap(NS(), None)
+        with self.assertRaisesRegex(ValueError, "requires DeepSpeed"):
+            configure_deepspeed_overlap(NS(state=NS(deepspeed_plugin=None)), False)
+
+    def test_engine_setting_must_match_explicit_request(self):
+        engine = NS(_config=NS(zero_config=NS(overlap_comm=False)))
+        self.assertIs(verify_deepspeed_overlap(engine, False), False)
+        with self.assertRaisesRegex(RuntimeError, "requested True, actual False"):
+            verify_deepspeed_overlap(engine, True)
+        self.assertIs(verify_deepspeed_overlap(engine, None), False)
 
 
 class TraceTests(unittest.TestCase):

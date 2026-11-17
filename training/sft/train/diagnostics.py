@@ -1,4 +1,4 @@
-"""Opt-in per-rank phase tracing; never adds a distributed collective."""
+"""Opt-in phase tracing and a single-variable DeepSpeed communication control."""
 from contextlib import contextmanager
 from functools import wraps
 from importlib.metadata import PackageNotFoundError, version
@@ -7,6 +7,29 @@ import os
 from pathlib import Path
 import time
 import traceback
+
+
+def configure_deepspeed_overlap(accelerator, overlap_comm):
+    """Override only overlap_comm before Accelerate initializes the engine."""
+    if overlap_comm is None:
+        return
+    if not isinstance(overlap_comm, bool):
+        raise ValueError("training.deepspeed_overlap_comm must be true, false, or null")
+    plugin = getattr(accelerator.state, "deepspeed_plugin", None)
+    if plugin is None:
+        raise ValueError("training.deepspeed_overlap_comm requires DeepSpeed")
+    # Accelerate passes this dictionary to deepspeed.initialize(config_params=...).
+    # In particular, do not change the prefetch bucket or accumulation boundary.
+    plugin.deepspeed_config.setdefault("zero_optimization", {})["overlap_comm"] = overlap_comm
+
+
+def verify_deepspeed_overlap(engine, requested):
+    """Fail at startup if the engine ignored an explicit communication setting."""
+    actual = engine._config.zero_config.overlap_comm
+    if requested is not None and actual != requested:
+        raise RuntimeError(
+            f"DeepSpeed overlap_comm mismatch: requested {requested}, actual {actual}")
+    return actual
 
 
 class PhaseTrace:

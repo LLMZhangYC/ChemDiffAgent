@@ -37,7 +37,7 @@ SYSTEM_PROMPT_LEN = 28
 from train.utils import get_config
 from train.metrics import MetricsLogger
 from train.timing import MicrostepTimer
-from train.diagnostics import PhaseTrace
+from train.diagnostics import PhaseTrace, configure_deepspeed_overlap, verify_deepspeed_overlap
 
 try:
     import apex
@@ -101,6 +101,8 @@ def main():
         raise RuntimeError(f"Expected NPU, got {accelerator.device}")
     if requested_device == "npu" and accelerator.distributed_type != DistributedType.DEEPSPEED:
         raise RuntimeError("Use tools/launch_npu.py: this SFT loop relies on DeepSpeed gradient accumulation")
+    overlap_comm = config.training.get("deepspeed_overlap_comm")
+    configure_deepspeed_overlap(accelerator, overlap_comm)
 
     #####################################
     # SETUP LOGGING, SEED and CONFIG    #
@@ -663,6 +665,9 @@ def main():
             model, optimizer, lr_scheduler, train_dataloader_lm = accelerator.prepare(
                 model, optimizer, lr_scheduler, train_dataloader_lm)
     if accelerator.distributed_type == DistributedType.DEEPSPEED:
+        actual_overlap = verify_deepspeed_overlap(model, overlap_comm)
+        logger.info(f"DeepSpeed effective overlap_comm={actual_overlap}; "
+                    f"gradient_accumulation_steps={model.gradient_accumulation_steps()}")
         trace.wrap_deepspeed(model)
 
     #################################
