@@ -5,9 +5,10 @@
 `training/sft/configs/chemdiffagent_sft_full_npu_4cards.yaml`。
 
 当前该配置用于复现第 363 步前向故障的对照：卡 4/5/6/7、梯度检查点关闭、
-`deepspeed_overlap_comm: false`、32 步累积、阶段日志开启，512 个 micro-steps 后退出。
+`deepspeed_overlap_comm: false`、32 步累积、阶段和通信入口日志开启，512 个 micro-steps 后退出。
 这次停止不执行验证或保存 checkpoint；如需完整训练，设置
-`diagnostics.stop_after_micro_steps=null`。它相对最近失败运行只改变通信重叠策略。
+`diagnostics.stop_after_micro_steps=null`。本轮在已失败的 overlap=false 基线上补充观测，
+不再修改通信执行策略。
 
 本配置从当前仓库的 `chemdiffagent_sft_full_npu.yaml` 派生，不替换模型实现、
 算子调用或依赖文件。继续使用你已经验证匹配的 Python、torch_npu 和 CANN 环境，
@@ -26,6 +27,8 @@
 | `training.deepspeed_overlap_comm` | 未设置，ZeRO-3 默认 true | false |
 | `diagnostics.enabled` | 未设置，默认 false | true |
 | `diagnostics.stop_after_micro_steps` | 未设置 | 512 |
+| `diagnostics.trace_collectives` | 未设置，默认 false | true，从第 320 步记录 |
+| `runtime.env.HCCL_ENTRY_LOG_ENABLE` | 未设置 | 1 |
 
 完整模型、3 epochs 的学习率日程、BF16、学习率、验证集切分、validation、profiling，
 以及当前的序列长度策略仍沿用八卡全量配置；诊断停止会在完整训练结束前退出。
@@ -168,9 +171,11 @@ bash scripts/train_sft_npu.sh \
   config=training/sft/configs/chemdiffagent_sft_full_npu_4cards.yaml
 ```
 
-最近第 363 步失败运行的实际配置是 checkpoint 关闭、overlap 开启。
-这轮相对它只关闭通信重叠；梯度累积仍为 32，预取、合并聚合、profiling、
-模型和数据路径、HCCL 环境均沿用本次基线。不要同时添加 `ASCEND_LAUNCH_BLOCKING`。
+15:07 的第 363 步失败运行是 checkpoint 关闭、overlap 开启。
+随后 15:42 启动的对照已确认 overlap 关闭，但四卡仍在第 363 步前向失败。
+因此关闭 overlap 不足以解决故障；当前先补通信入口记录，不继续同时修改多个执行条件。
+梯度累积仍为 32，预取、合并聚合、profiling、模型和数据路径保留。
+不要同时添加 `ASCEND_LAUNCH_BLOCKING`。
 关闭 overlap 不等于关闭预取或使全部 HCCL 调用成为同步调用。
 512 是诊断停止条件，不修改学习率日程；到达后不执行验证或保存 checkpoint。
 若需要继续完整训练，将 `diagnostics.stop_after_micro_steps` 保持为 `null`。
@@ -191,5 +196,59 @@ grep '"phase": "deepspeed"' output/diagnostics/rank_0.jsonl
 
 应包含 `overlap_comm=False`，预取上限仍为 `prefetch_bucket_size=50000000`（原默认值）。
 若越过第 363 步，先验证到 512 步的 16 次更新；一次通过不能证明已解决长期稳定性问题。
-若再次失败，比较四卡阶段日志和同一轮的 HCCL 日志。此开关仅完成本地配置传递与回归测试，
-尚未在目标 A5 上验证故障是否消失。
+若再次失败，比较四卡阶段日志和同一轮的 HCCL 日志。
+
+## 继续定位：对齐四卡通信入口
+
+2026-11-17 15:42 运行的实际配置为 `overlap_comm=False`，完成 362 micro-steps / 11 updates，
+四个 rank 在第 363 步 `model_forward` 报错，输入均为 `[1, 8918]`。CANN 记录四卡
+BF16 AllGather，输入各 24 MiB、输出各 96 MiB，但失败记录的 opIndex 分别是
+`22102 / 22107 / 22113 / 22117`。这些是不同 rank 的异常快照，不能据此确认同一操作匹配，
+也不能直接断言通信错序或某张卡未调用。`RunAllGather Send failed` / `ret[4]` 定位到
+AICPU AllGather 的发送路径，尚未提供对端、传输层或资源状态的具体首错。
+
+当前四卡配置已额外启用以下记录，仍在 512 步停止、不保存 checkpoint：
+
+```yaml
+diagnostics:
+  trace_collectives: true
+  collectives_start_micro_step: 320
+runtime:
+  env:
+    HCCL_ENTRY_LOG_ENABLE: "1"
+```
+
+仍使用本页原来的 bash 启动命令。DeepSpeed 初始化后，每卡打印 `[SFT collectives]`。
+`output/diagnostics/collectives_rank_<rank>.jsonl` 记录通信类型、通信组、该组内调用序号、
+tensor 的数量/dtype/地址/stride，以及触发参数获取的模块名。序号从 prepare 后开始累计，
+第 320 步开始写入；不是 HCCL opIndex。模块获取过程中也可能预取后续模块，
+所以 `fetch_context.module` 不是失败参数的确切归属。直接调用 torch.distributed 的通信不在
+此 Python 记录范围内，必须结合 CANN 日志核对。包装器原样返回 Work，不新增 wait、同步或集合通信。
+逐行日志写入仍会影响主机时序；加日志后不复现不等于修好。
+
+从仓库根目录执行，RUN 填启动器打印的本次实际运行目录：
+
+```bash
+RUN=/实际运行目录
+python training/sft/tools/compare_collectives.py "$RUN/output/diagnostics" \
+  > "$RUN/output/collective_comparison.json"
+grep -R -n -E 'Entry-HcclAllGather|opData information|groupRank information|RunAllGather.*failed|SendRecvBatch|ProcessLayer.*failed' \
+  "$RUN/work/logs/ascend" > "$RUN/output/hccl_entries_and_errors.txt"
+```
+
+比较脚本只需 Python 标准库。它比较共同序号上的 op、元素数、dtype、shape 等，报告第一个
+不一致及缺失尾段。缺失尾段也可能是另一卡先失败导致本卡停止下发，不能直接当作根因。
+`host_return` 仅是 Python 返回，不代表设备完成。四卡序列完全一致只能排除已记录范围内的
+部分错序/尺寸问题，不能排除 HCCL 执行、资源、内存生命周期或模型算子造成的内存破坏。
+
+`HCCL_ENTRY_LOG_ENABLE` 是 CANN 原生入口记录开关；实际 PR 是否支持及是否生效，以
+`work/logs/ascend/run/plog` 中的 `Entry-HcclAllGather` 为准。未出现时请保留完整的
+`work/logs/ascend`（包含 run 与 debug），不要只保留 grep 命中的 ERROR 行。
+
+后续按证据单变量测试：先核对四卡序列；一致时比较与日志同布局的 BF16 24 MiB
+in-place AllGather 长循环与独立输入缓冲区版本；再独立关闭 ZeRO 参数预取或改变聚合方式。
+若脱离模型/DeepSpeed 仍失败，优先交给对应 A5 PR 的 HCCL/CANN 团队核对驱动、固件、
+运行库和通信资源。不要直接照搬其他产品的展开模式或环境变量支持范围。
+
+参考：[CANN 故障定位与入口日志](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/hcclug/hcclug_000024.html)、
+[DeepSpeed 0.18.6 参数获取实现](https://github.com/deepspeedai/DeepSpeed/blob/v0.18.6/deepspeed/runtime/zero/parameter_offload.py)。

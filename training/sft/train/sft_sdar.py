@@ -38,6 +38,7 @@ from train.utils import get_config
 from train.metrics import MetricsLogger
 from train.timing import MicrostepTimer
 from train.diagnostics import PhaseTrace, configure_deepspeed_overlap, verify_deepspeed_overlap
+from train.collective_trace import install_collective_trace
 
 try:
     import apex
@@ -672,6 +673,7 @@ def main():
                   f"gradient_accumulation_steps={model.gradient_accumulation_steps()}; "
                   f"gradient_checkpointing={model.module.is_gradient_checkpointing}", flush=True)
         trace.wrap_deepspeed(model)
+        collective_trace = install_collective_trace(model, trace, config.get("diagnostics", {}))
 
     #################################
     #             Training          #
