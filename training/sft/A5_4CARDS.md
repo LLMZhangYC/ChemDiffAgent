@@ -314,3 +314,53 @@ bash scripts/repro_hccl_allgather.sh --window 1
 
 前三个控制项分别对应布局、通信域共享、并发深度。不要一次同时修改它们。
 本脚本只完成本地语法和控制流程验证，真实 HCCL 复现结果需由 A5 运行确认。
+
+### 纯 AllGather 通过后的混合通信测试
+
+2026-11-17 用户回传的独立测试结果：`17:40:35` 运行使用 `window=8`，
+`17:48:51` 运行使用 `window=64`，两轮均为四卡、两个通信域、BF16、24 MiB 输入、
+in-place 布局、每 rank 60,000 次，四个 rank 均记录 `passed`。
+第二轮单独检索 overflow / RunAllGather Send failed / DoSendRecvBatchRx.*20 无命中。
+这表明上述两个纯 AllGather 场景未复现；不证明训练中的 overflow 已解决，
+也不能据此判定具体 CANN 修订是否缺失。
+
+训练的通信追踪还记录了另一个域的 `reduce_scatter_tensor`，SUM、`async_op=False`，
+每 rank 输入 311,164,928 个 BF16 元素（593.5 MiB），输出 77,791,232 个（148.375 MiB），
+输出是输入中本 rank 对应的四分之一。新增 `mixed` 模式覆盖这种操作组合：
+
+```bash
+bash scripts/repro_hccl_allgather.sh --workload mixed
+```
+
+默认每批先在 group 0 执行 8 次 AllGather，等待并同步设备；再在 group 1 执行一次
+上述尺寸的 ReduceScatter，设备同步后进入下一批。默认 60,000 次 AllGather 加
+7,500 次 ReduceScatter，总 tensor 缓冲区约 1.33 GiB/卡，另有通信/运行时资源。
+保留首轮已通过的 `window=8`，作为新的组合场景与首轮比较；不要同时修改训练配置。
+这里改变了第二个域的操作类型、尺寸和通信节奏，不是单一因素归因实验，
+也不是训练通信的精确回放：尚未覆盖所有尺寸、模型计算、动态分配和 ZeRO 预取时序。
+若能复现，再逐项缩小触发条件。
+
+`--iterations` 始终只计算 AllGather；ReduceScatter 次数为向上取整的
+`iterations / window`。`--rs-elements` 修改 ReduceScatter **每 rank 输出**元素数，
+默认使用训练追踪值。`--groups 1` 可做同域对照；`--layout separate` 对两个算子
+都改用独立输入/输出，作为后续布局对照。默认纯 AllGather 模式的操作与布局保持原样。
+
+混合模式分别记录 `reduce_scatter_enter`、`reduce_scatter_device_complete` 和
+抽样检查结果。四个目标分片填入不同且可精确表示的 BF16 整数，校验本 rank 输出
+首/中/末位置的 SUM；等待及设备同步完成前不复用缓冲区。
+接口约定参见 [PyTorch 2.10 ReduceScatter 文档](https://docs.pytorch.org/docs/2.10/distributed.html#torch.distributed.reduce_scatter_tensor)。
+
+在新结果目录确认结论时，先看四卡结束标记，再单独检索故障：
+
+```bash
+for r in 0 1 2 3; do
+  echo "rank=$r"
+  tail -n 1 "output/rank_${r}.jsonl"
+done
+grep -R -n -E 'overflow check failed|jetty SQ overflow|DoSendRecvBatchRx.*20|RunAllGather Send failed|HcclLaunchAicpuKernel run failed' work/logs/ascend
+```
+
+不要用 `-m 3` 把正常的算法名称与故障关键字放在同一条搜索中：每个文件前 3 条
+正常命中就可能截断后续错误。`passed` 是脚本执行完成并通过抽样检查的标记；
+若出现错误，仍需结合 CANN 首错区分是否复现同一 overflow，而不是只看 Python 错误码。
+混合模式已完成本地 8 项控制流程测试，尚未在 A5 运行。
